@@ -1,0 +1,141 @@
+let t = OCI_Logs_CL | where TimeGenerated >= ago(7d);
+let summarize_topN = (colName:string)
+{
+    t
+    | where isnotempty(tostring(column_ifexists(colName, "")))
+    | summarize Count = count() by val = tostring(column_ifexists(colName, ""))
+    | top 10 by Count desc
+    | summarize Values = make_list(val)
+    | extend ColumnName = colName
+};
+let NoValues_ = datatable(ColumnName:string)
+[
+    "data_sourceAddress_s",
+    "data_destinationAddress_s",
+    "data_destinationPort_d",
+    "data_identity_ipAddress_s",
+    "data_identity_userAgent_s"
+];
+let data_action_s_ = summarize_topN("data_action_s");
+let data_additional_details_UserEventTracking_Details_bytesRetrieved_d_ = summarize_topN("data_additional_details_UserEventTracking_Details_bytesRetrieved_d");
+let data_additional_details_UserEventTracking_Details_executeTime_d_ = summarize_topN("data_additional_details_UserEventTracking_Details_executeTime_d");
+let data_additional_details_UserEventTracking_Details_numberOfRows_d_ = summarize_topN("data_additional_details_UserEventTracking_Details_numberOfRows_d");
+let data_additional_details_UserEventTracking_Details_outcome_s_ = summarize_topN("data_additional_details_UserEventTracking_Details_outcome_s");
+let data_additional_details_UserEventTracking_Details_queryType_s_ = summarize_topN("data_additional_details_UserEventTracking_Details_queryType_s");
+let data_additional_details_UserEventTracking_Details_resultsetcachehit_b_ = summarize_topN("data_additional_details_UserEventTracking_Details_resultsetcachehit_b");
+let data_additional_details_UserEventTracking_Details_subjectAreas_s_ = summarize_topN("data_additional_details_UserEventTracking_Details_subjectAreas_s");
+let data_additional_details_UserEventTracking_Details_totalTime_d_ = summarize_topN("data_additional_details_UserEventTracking_Details_totalTime_d");
+let data_additional_details_UserEventTracking_Details_units_s_ = summarize_topN("data_additional_details_UserEventTracking_Details_units_s");
+let data_additional_details_UserEventTracking_Details_username_s_ = summarize_topN("data_additional_details_UserEventTracking_Details_username_s");
+let data_additional_details_UserEventTracking_Details_xqafailure_b_ = summarize_topN("data_additional_details_UserEventTracking_Details_xqafailure_b");
+let data_backendStatusCode_s_ = summarize_topN("data_backendStatusCode_s");
+let data_bucketId_s_ = summarize_topN("data_bucketId_s");
+let data_bucketName_s_ = summarize_topN("data_bucketName_s");
+let data_bytesDownloaded_s_ = summarize_topN("data_bytesDownloaded_s");
+let data_bytesOut_d_ = summarize_topN("data_bytesOut_d");
+let data_bytesUploaded_s_ = summarize_topN("data_bytesUploaded_s");
+let data_clientIpAddress_s_ = summarize_topN("data_clientIpAddress_s");
+let data_definedTags_Oracle_Tags_CreatedBy_s_ = summarize_topN("data_definedTags_Oracle_Tags_CreatedBy_s");
+let data_errorLog_errorDetails_s_ = summarize_topN("data_errorLog_errorDetails_s");
+let data_errorLog_type_s_ = summarize_topN("data_errorLog_type_s");
+let data_host_s_ = summarize_topN("data_host_s");
+let data_httpUserAgent_s_ = summarize_topN("data_httpUserAgent_s");
+let data_identity_authType_s_ = summarize_topN("data_identity_authType_s");
+let data_identity_callerId_g_ = summarize_topN("data_identity_callerId_g");
+let data_identity_callerId_s_ = summarize_topN("data_identity_callerId_s");
+let data_identity_credentials_s_ = summarize_topN("data_identity_credentials_s");
+let data_identity_principalName_g_ = summarize_topN("data_identity_principalName_g");
+let data_identity_principalName_s_ = summarize_topN("data_identity_principalName_s");
+let data_identity_userAgent_s_ = summarize_topN("data_identity_userAgent_s");
+let data_message_s_ = summarize_topN("data_message_s");
+let data_namespaceName_s_ = summarize_topN("data_namespaceName_s");
+let data_opcRequestId_s_ = summarize_topN("data_opcRequestId_s");
+let data_protocolName_s_ = summarize_topN("data_protocolName_s");
+let data_remoteAddr_s_ = summarize_topN("data_remoteAddr_s");
+let data_request_action_s_ = summarize_topN("data_request_action_s");
+let data_request_agent_s_ = summarize_topN("data_request_agent_s");
+let data_request_parameters_s_ = summarize_topN("data_request_parameters_s");
+let data_request_path_s_ = summarize_topN("data_request_path_s");
+let data_request_xForwardedFor_s_ = summarize_topN("data_request_xForwardedFor_s");
+let data_requestAction_s_ = summarize_topN("data_requestAction_s");
+let data_requestMethod_s_ = summarize_topN("data_requestMethod_s");
+let data_requestResourcePath_s_ = summarize_topN("data_requestResourcePath_s");
+let data_stateChange_previous_capabilities_canUseDbCredentials_b_ = summarize_topN("data_stateChange_previous_capabilities_canUseDbCredentials_b");
+let data_stateChange_previous_groupId_s_ = summarize_topN("data_stateChange_previous_groupId_s");
+let data_stateChange_previous_isEnabled_b_ = summarize_topN("data_stateChange_previous_isEnabled_b");
+let data_stateChange_previous_isMfaActivated_b_ = summarize_topN("data_stateChange_previous_isMfaActivated_b");
+let data_stateChange_previous_prohibitInternetIngress_b_ = summarize_topN("data_stateChange_previous_prohibitInternetIngress_b");
+let data_stateChange_previous_prohibitPublicIpOnVnic_b_ = summarize_topN("data_stateChange_previous_prohibitPublicIpOnVnic_b");
+let data_stateChange_previous_routeRules_s_ = summarize_topN("data_stateChange_previous_routeRules_s");
+let data_stateChange_previous_sshPublicKeys_s_ = summarize_topN("data_stateChange_previous_sshPublicKeys_s");
+let data_status_s_ = summarize_topN("data_status_s");
+let data_statusCode_d_ = summarize_topN("data_statusCode_d");
+let data_userId_g_ = summarize_topN("data_userId_g");
+let data_userId_s_ = summarize_topN("data_userId_s");
+let data_eventName_s_ = summarize_topN("data_eventName_s");
+let source_s_ = summarize_topN("source_s");
+// Grab schema
+let schema = OCI_Logs_CL
+| getschema
+| project ColumnName, DataType, ColumnType;
+// Combine all with NoValues_ (which has no Values column)
+NoValues_
+| extend Values = dynamic(null)
+| union data_action_s_,
+    data_additional_details_UserEventTracking_Details_bytesRetrieved_d_,
+    data_additional_details_UserEventTracking_Details_executeTime_d_,
+    data_additional_details_UserEventTracking_Details_numberOfRows_d_,
+    data_additional_details_UserEventTracking_Details_outcome_s_,
+    data_additional_details_UserEventTracking_Details_queryType_s_,
+    data_additional_details_UserEventTracking_Details_resultsetcachehit_b_,
+    data_additional_details_UserEventTracking_Details_subjectAreas_s_,
+    data_additional_details_UserEventTracking_Details_totalTime_d_,
+    data_additional_details_UserEventTracking_Details_units_s_,
+    data_additional_details_UserEventTracking_Details_username_s_,
+    data_additional_details_UserEventTracking_Details_xqafailure_b_,
+    data_backendStatusCode_s_,
+    data_bucketId_s_,
+    data_bucketName_s_,
+    data_bytesDownloaded_s_,
+    data_bytesOut_d_,
+    data_bytesUploaded_s_,
+    data_clientIpAddress_s_,
+    data_definedTags_Oracle_Tags_CreatedBy_s_,
+    data_errorLog_errorDetails_s_,
+    data_errorLog_type_s_,
+    data_host_s_,
+    data_httpUserAgent_s_,
+    data_identity_authType_s_,
+    data_identity_callerId_g_,
+    data_identity_callerId_s_,
+    data_identity_credentials_s_,
+    data_identity_principalName_g_,
+    data_identity_principalName_s_,
+    data_identity_userAgent_s_,
+    data_message_s_,
+    data_namespaceName_s_,
+    data_opcRequestId_s_,
+    data_protocolName_s_,
+    data_remoteAddr_s_,
+    data_request_action_s_,
+    data_request_agent_s_,
+    data_request_parameters_s_,
+    data_request_path_s_,
+    data_request_xForwardedFor_s_,
+    data_requestAction_s_,
+    data_requestMethod_s_,
+    data_requestResourcePath_s_,
+    data_stateChange_previous_capabilities_canUseDbCredentials_b_,
+    data_stateChange_previous_groupId_s_,
+    data_stateChange_previous_isEnabled_b_,
+    data_stateChange_previous_isMfaActivated_b_,
+    data_stateChange_previous_prohibitInternetIngress_b_,
+    data_stateChange_previous_prohibitPublicIpOnVnic_b_,
+    data_stateChange_previous_routeRules_s_,
+    data_stateChange_previous_sshPublicKeys_s_,
+    data_status_s_,
+    data_statusCode_d_,
+    data_userId_g_,
+	source_s_
+| join kind=leftouter schema on ColumnName
+| project ColumnName, Values, DataType, ColumnType
