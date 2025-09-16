@@ -1,12 +1,15 @@
 // Name: Registry Modification for Persistence (High-Confidence)
 // Severity: Medium
 // Description: Focused detection for malicious autorun registry modifications, filtering out software updates and maintenance
+// Add additional autorun_keys based on your environment
 let autorun_keys = dynamic([
     @"\Software\Microsoft\Windows\CurrentVersion\Run",
     @"\Software\Microsoft\Windows\CurrentVersion\RunOnce"
 ]);
-// Only truly suspicious processes that rarely have legitimate autorun purposes
-let HighRiskProcesses = dynamic([
+// Suspicious processes that rarely have legitimate autorun purposes
+// Modify and add more based on your environment
+// See https://lolbas-project.github.io/
+let RiskyProcesses = dynamic([
     "regsvr32.exe",
     "mshta.exe", 
     "wmic.exe",
