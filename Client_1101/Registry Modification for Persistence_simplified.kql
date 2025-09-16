@@ -1,0 +1,73 @@
+// Name: Registry Modification for Persistence (High-Confidence)
+// Severity: Medium
+// Description: Focused detection for malicious autorun registry modifications, filtering out software updates and maintenance
+let autorun_keys = dynamic([
+    @"\Software\Microsoft\Windows\CurrentVersion\Run",
+    @"\Software\Microsoft\Windows\CurrentVersion\RunOnce"
+]);
+// Only truly suspicious processes that rarely have legitimate autorun purposes
+let HighRiskProcesses = dynamic([
+    "regsvr32.exe",
+    "mshta.exe", 
+    "wmic.exe",
+    "certutil.exe",
+    "bitsadmin.exe",
+    "regasm.exe",
+    "installutil.exe",
+    "cscript.exe",
+    "wscript.exe"
+]);
+// Comprehensive legitimate processes including update/maintenance tools
+let LegitimateProcesses = dynamic([
+    "msiexec.exe", "setup.exe", "install.exe", "update.exe", "installer.exe",
+    "ccmexec.exe", "omadmclient.exe", "tiworker.exe", "services.exe", 
+    "svchost.exe", "winlogon.exe", "userinit.exe", "explorer.exe",
+    "csrss.exe", "lsass.exe", "dwm.exe", "RuntimeBroker.exe", "conhost.exe",
+    "msedge.exe", "chrome.exe", "firefox.exe", "cmd.exe"  // Added browsers and cmd for legitimate operations
+]);
+// Expanded patterns including update/uninstall activities
+let LegitimateValuePatterns = dynamic([
+    "SecurityHealth", "WindowsDefender", "Microsoft", "Office", "OneDrive", 
+    "Teams", "Adobe", "Chrome", "Firefox", "Java", "VMware", "Citrix",
+    "Skype", "Zoom", "Slack", "Dropbox", "Steam", "Discord", "Spotify",
+    "Uninstall", "Delete Cached", "Update Binary"  // Added update/uninstall patterns
+]);
+DeviceRegistryEvents
+| where TimeGenerated >= ago(1d)
+| where ActionType in ("RegistryValueSet", "RegistryKeyCreated")
+| where RegistryKey has_any (autorun_keys)
+// Exclude system-level modifications (often legitimate)
+| where InitiatingProcessAccountName !in~ ("system", "local service", "network service")
+// Exclude update/uninstall/maintenance operations
+| where not(RegistryValueName has_any (LegitimateValuePatterns))
+| where not(RegistryValueName matches regex @"(?i)(uninstall|delete.*cached|update.*binary|version|guid|\{[0-9a-f-]+\})")
+// Exclude legitimate software paths
+| where not(RegistryValueData contains_cs "Program Files")
+| where not(RegistryValueData contains_cs "Windows\\System32")
+| where not(RegistryValueData matches regex @"(?i)(microsoft|google|adobe|mozilla)")
+// Focus ONLY on high-risk indicators
+| where InitiatingProcessFileName in~ (HighRiskProcesses)
+    or (
+        // Only flag non-legitimate processes with suspicious characteristics
+        not(InitiatingProcessFileName in~ (LegitimateProcesses)) 
+        and not(InitiatingProcessCommandLine has_any ("--new-window", "cbdedit", "PcaSvc.dll"))
+        and (
+            RegistryValueData matches regex @"(?i)(\\temp\\|\\appdata\\local\\temp\\|\\downloads\\|\\users\\[^\\]+\\desktop\\)" 
+            or RegistryValueData matches regex @"(?i)\.(bat|cmd|ps1|vbs|js|scr|pif)$"
+            or RegistryValueData contains "powershell -"
+            or RegistryValueData contains "cmd /c"
+        )
+    )
+// Additional risk scoring with higher thresholds
+| extend RiskScore = case(
+    InitiatingProcessFileName in~ (HighRiskProcesses), 5,
+    RegistryValueData matches regex @"(?i)\.(bat|cmd|ps1|vbs|js)$", 4,
+    RegistryValueData contains "powershell -", 4,
+    RegistryValueData matches regex @"(?i)(\\temp\\|downloads)", 3,
+    2
+)
+| where RiskScore >= 4  // Much higher threshold
+| project TimeGenerated, DeviceName, InitiatingProcessAccountName, ActionType, 
+         RegistryKey, RegistryValueName, RegistryValueData, InitiatingProcessFileName, 
+         InitiatingProcessCommandLine, RiskScore
+| sort by RiskScore desc, TimeGenerated desc
