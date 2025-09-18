@@ -300,8 +300,12 @@ let MinRandomLen = 10;
 let MinUniqueRoots = 3;
 let InfobloxTXTBeaconing = Infoblox_NIOS_ParsedData
 | where TimeGenerated >= ago(InfobloxWindow)
-| where Log_Type == "client" and EventSubType == "request" and EventType in ("Query", "QUERY")
+| where ipv4_is_private(SrcIpAddr) == true and DnsQueryType == "TXT"
+| where Log_Type == "client" and EventSubType == "request" and EventType has "Query"
+
+| where Log_Type == "client" and EventSubType == "request" and EventType has "Query"
 | where isnotempty(DnsQuery)
+// Exclude common legitimate DNS queries
 | where not(DnsQuery has_any ("microsoft", "windows", "office", "office365", "google", "apple", "zoom", "teams", "adobe", "amazon", "cloudflare"))
 | extend FirstLabel = tostring(split(DnsQuery, ".")[0])
 | extend RootDomain = iff(indexof(DnsQuery, ".") > 0, extract(@"([^.]+\.[^.]+)$", 1, DnsQuery), DnsQuery)
@@ -411,9 +415,120 @@ DNSBeaconingActivity
 )
 | union (InfobloxTXTBeaconing)
 | union (InfobloxCorrelatedBeaconing)
+| union (InfobloxDNSClientBeaconing)
 | sort by 
     case(Severity == "High", 1, 2),  // Sort High severity first
     iff(isnotnull(SuspicionScore), SuspicionScore, BeaconRiskScore) desc;
+
+//==============================================================================
+
+// Query 6: Infoblox DNS Client - TXT Beaconing and DGA Detection (Syslog-based)
+// Severity: Medium / High
+// Uses raw Syslog parsing to detect TXT beaconing and DGA-like patterns from internal clients
+
+let InfobloxClientWindow = 6h;
+let MinTxtBeaconCount = 8;
+let MinDGAVariations = 4;
+let MinRandomLen = 12;
+
+let InfobloxDNSClientBeaconing = 
+let lookback_ = ago(InfobloxClientWindow);
+let Infoblox_NIOS_ParsedData =
+    Syslog
+    | where TimeGenerated >= lookback_
+    | where SyslogMessage has_all ("client", "query:")
+        and SyslogMessage !has "response:"
+    | extend SyslogMessage = (split(SyslogMessage,"client "))[1]
+    | extend SyslogMessage = iif(SyslogMessage startswith "@", (substring(SyslogMessage, indexof(SyslogMessage, " ")+1)), SyslogMessage)
+    | extend SyslogMessage = replace_string(SyslogMessage,"\\ ","@@@")
+    | parse SyslogMessage with 
+        SrcIpAddr: string
+        "#" SrcPortNumber: int *
+        "query: " DnsQuery: string
+        " " DnsQueryClassName: string
+        " " DnsQueryType: string
+        " " DnsFlags: string
+    | extend DnsQuery = replace_string (DnsQuery, '@@@', ' ')
+    | extend DnsFlags= tostring((split(DnsFlags," "))[0])
+    | extend EventSubType = "request",DnsResponseCode = "NA"
+    | project-away SyslogMessage
+    | extend
+        EventProduct="NIOS",
+        EventVendor="Infoblox",
+        EventType="Query",
+        EventResult=iff(EventSubType=="request" or DnsResponseCode=="NOERROR","Success","Failure"),
+        Log_Type="client",
+        responseTime=EventTime;
+Infoblox_NIOS_ParsedData
+| where TimeGenerated >= lookback_
+| where DnsQueryType =~ "TXT" and EventType =~ "query" and EventSubType =~ "request"
+| where ipv4_is_private(SrcIpAddr) == true and isnotempty(DnsQuery)
+// Exclude common legitimate domains and TXT records
+| extend RootDomain = iff(indexof(DnsQuery, ".") > 0, extract(@"([^.]+\.[^.]+)$", 1, DnsQuery), DnsQuery)
+| where not(RootDomain has_any ("internaldomain.com", "localdomain", "example.com"))  // Exclude internal or example domains
+| where not(DnsQuery has_any ("microsoft", "windows", "office", "office365", "google", "apple", "zoom", "teams", "adobe", "amazon", "cloudflare"))
+| where not(DnsQuery startswith "_dmarc." or DnsQuery startswith "_spf." or DnsQuery startswith "_domainkey." or DnsQuery startswith "_acme-challenge." or DnsQuery startswith "_mta-sts.")
+| extend FirstLabel = tostring(split(DnsQuery, ".")[0])
+| extend LabelLen = strlen(FirstLabel)
+// DGA and beaconing pattern detection
+| extend 
+    HasNumericCluster = FirstLabel matches regex @"\d{3,}",
+    HasRandomish = FirstLabel matches regex @"^[a-z0-9]{12,}$" and LabelLen >= MinRandomLen,
+    HasMixedPattern = FirstLabel matches regex @"[a-z].*\d|\d.*[a-z]",
+    HasSuspiciousChars = FirstLabel matches regex @"[qxzjk]{2,}|[0-9]{4,}",
+    IsLongLabel = LabelLen >= MinRandomLen,
+    IsShortTLD = strlen(extract(@"\.([^.]+)$", 1, DnsQuery)) <= 3
+| summarize
+    TotalTXTQueries = count(),
+    UniqueRootDomains = dcount(RootDomain),
+    UniqueQueries = dcount(DnsQuery),
+    RandomishCount = countif(HasRandomish),
+    NumericClusterCount = countif(HasNumericCluster),
+    MixedPatternCount = countif(HasMixedPattern),
+    SuspiciousCharCount = countif(HasSuspiciousChars),
+    LongLabelCount = countif(IsLongLabel),
+    ShortTLDCount = countif(IsShortTLD),
+    RootDomains = make_set(RootDomain, 20),
+    SampleTXTQueries = make_set(DnsQuery, 20),
+    FirstQueryTime = min(TimeGenerated),
+    LastQueryTime = max(TimeGenerated),
+    QueryFrequencyPerHr = count() / (datetime_diff('hour', max(TimeGenerated), min(TimeGenerated)) + 1)
+    by SrcIpAddr
+// Filter for TXT beaconing or DGA patterns
+| where TotalTXTQueries >= MinTxtBeaconCount 
+       or (RandomishCount >= 3 and UniqueRootDomains >= MinDGAVariations)
+       or (LongLabelCount >= 5 and UniqueRootDomains >= 3)
+       or (NumericClusterCount >= 4 and MixedPatternCount >= 3)
+// Calculate comprehensive suspicion score
+| extend SuspicionScore = 
+    TotalTXTQueries * 2.0 +                    // Heavy weight for TXT volume
+    RandomishCount * 4.0 +                     // High weight for DGA patterns
+    NumericClusterCount * 2.5 +                // Moderate weight for numeric clusters
+    MixedPatternCount * 2.0 +                  // Mixed alphanumeric patterns
+    SuspiciousCharCount * 3.0 +                // Suspicious character patterns
+    LongLabelCount * 1.5 +                     // Long subdomain labels
+    UniqueRootDomains * 2.5 +                  // Domain variety (beaconing indicator)
+    QueryFrequencyPerHr * 1.5 +                // Query frequency
+    ShortTLDCount * 1.0                        // Uncommon TLD usage
+| where SuspicionScore >= 15  // Adjusted threshold for TXT-focused detection
+| project
+    AlertTime = LastQueryTime,
+    Severity = case(
+        SuspicionScore >= 30, "High",
+        SuspicionScore >= 20, "Medium",
+        "Low"
+    ),
+    BeaconingDevice = SrcIpAddr,
+    SuspiciousProcess = "",  // Not available from DNS logs
+    ProcessAccount = "",     // Not available from DNS logs
+    BeaconMetrics = strcat("TXT: ", TotalTXTQueries, " | Roots: ", UniqueRootDomains, " | Unique: ", UniqueQueries, " | Freq: ", round(QueryFrequencyPerHr, 2), "/hr"),
+    DGAIndicators = strcat("Random: ", RandomishCount, " | Numeric: ", NumericClusterCount, " | Mixed: ", MixedPatternCount, " | Suspicious: ", SuspiciousCharCount, " | Long: ", LongLabelCount),
+    BeaconDuration = datetime_diff('hour', LastQueryTime, FirstQueryTime),
+    SuspiciousDomains = strcat_array(array_slice(SampleTXTQueries, 0, 12), ", "),
+    DomainRoots = RootDomains,
+    SuspicionScore,
+    QueryFrequency = QueryFrequencyPerHr
+| sort by SuspicionScore desc;
 
 // Name: Beaconing via DNS TXT/Random Subdomain Patterns
 // severity: Medium / High
