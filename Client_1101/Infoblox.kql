@@ -1,0 +1,52 @@
+let t = Infoblox_NOIS_ParsedData | where TimeGenerated >= ago(7d);
+let summarize_topN = (colName:string)
+{
+    t
+    | where isnotempty(tostring(column_ifexists(colName, "")))
+    | summarize Count = count() by val = tostring(column_ifexists(colName, ""))
+    | top 10 by Count desc
+    | summarize Values = make_list(val)
+    | extend ColumnName = colName
+};
+let NoValues_ = datatable(ColumnName:string)
+[
+    "TimeGenerated",
+];
+let Computer_ = summarize_topN("Computer");
+let EventTime_ = summarize_topN("EventTime");
+let Facility_ = summarize_topN("Facility");
+let HostName_ = summarize_topN("HostName");
+let SeverityLevel_ = summarize_topN("SeverityLevel");
+let ProcessID_ = summarize_topN("ProcessID");
+let HostIP_ = summarize_topN("HostIP");
+let ProcessName_ = summarize_topN("ProcessName");
+let MG_ = summarize_topN("MG");
+let CollectorHostName_ = summarize_topN("CollectorHostName");
+let Type_ = summarize_topN("Type");
+let _ResourceId_ = summarize_topN("_ResourceId");
+let SrcIpAddr_ = summarize_topN("SrcIpAddr");
+let SrcPortNumber_ = summarize_topN("SrcPortNumber");
+let NetworkProtocol_ = summarize_topN("NetworkProtocol");
+let DnsQuery_ = summarize_topN("DnsQuery");
+let DnsQueryClassName_ = summarize_topN("DnsQueryClassName");
+let DnsQueryType_ = summarize_topN("DnsQueryType");
+let DnsResponseCode_ = summarize_topN("DnsResponseCode");
+let DnsFlags_ = summarize_topN("DnsFlags");
+let EventMessage_ = summarize_topN("EventMessage");
+let EventSubType_ = summarize_topN("EventSubType");
+let EventProduct_ = summarize_topN("EventProduct");
+let EventVendor_ = summarize_topN("EventVendor");
+let EventType_ = summarize_topN("EventType");
+let EventResult_ = summarize_topN("EventResult");
+let Log_Type_ = summarize_topN("Log_Type");
+let responseTime_ = summarize_topN("responseTime");
+// Grab schema
+let schema = Infoblox_NOIS_ParsedData
+| getschema
+| project ColumnName, DataType, ColumnType;
+// Combine all with NoValues_ (which has no Values column)
+NoValues_
+| extend Values = dynamic(null)
+| union Computer_, EventTime_, Facility_, HostName_, SeverityLevel_, ProcessID_, HostIP_, ProcessName_, MG_, CollectorHostName_, Type_, _ResourceId_, SrcIpAddr_, SrcPortNumber_, NetworkProtocol_, DnsQuery_, DnsQueryClassName_, DnsQueryType_, DnsResponseCode_, DnsFlags_, EventMessage_, EventSubType_, EventProduct_, EventVendor_, EventType_, EventResult_, Log_Type_, responseTime_
+| join kind=leftouter schema on ColumnName
+| project ColumnName, Values, DataType, ColumnType
