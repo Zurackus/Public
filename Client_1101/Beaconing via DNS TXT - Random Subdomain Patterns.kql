@@ -1,0 +1,420 @@
+// Name: Beaconing via DNS TXT/Random Subdomain Patterns
+// severity: Medium / High
+// Description: Flags repeated DNS TXT queries or randomized subdomain patterns (DGA-like) from internal devices.
+
+// Query 1: DNS Beaconing Detection via DeviceNetworkEvents
+// Severity: High
+// Detects suspicious DNS query patterns indicating C2 beaconing or Domain Generation Algorithm (DGA) activity
+
+let DNSBeaconWindow = 4h;
+let MinBeaconCount = 10;  // Minimum queries to consider beaconing
+let MinDomainVariations = 5;  // Minimum unique domains for DGA detection
+// Modified Step 1: Detect High-Frequency DNS Query Patterns (RemoteIP-based approach)
+let DNSBeaconingActivity = DeviceNetworkEvents
+| where TimeGenerated >= ago(DNSBeaconWindow)
+| where ActionType == "DnsConnectionInspected"
+| where Protocol in ("Udp", "TcpV6", "Tcp") and RemotePort == 53  // DNS traffic
+| where RemoteIPType == "Public"  // External DNS queries
+| where isnotempty(RemoteIP)  // Must have IP information
+// Exclude common legitimate DNS servers
+| where not(RemoteIP in (
+    "8.8.8.8", "8.8.4.4",  // Google DNS
+    "1.1.1.1", "1.0.0.1",  // Cloudflare DNS
+    "208.67.222.222", "208.67.220.220",  // OpenDNS
+    "9.9.9.9", "149.112.112.112"  // Quad9 DNS
+))
+// Alternative approach: Use RemoteUrl if available, otherwise analyze IP patterns
+| extend DomainInfo = case(
+    isnotempty(RemoteUrl), RemoteUrl,  // Use RemoteUrl if populated
+    isnotempty(RemoteIP), RemoteIP,    // Fall back to RemoteIP
+    "unknown"
+)
+| where DomainInfo != "unknown"
+// For IP-based analysis, focus on suspicious network patterns
+| extend 
+    IsIPAddress = DomainInfo matches regex @"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$",
+    DomainRoot = case(
+        isnotempty(RemoteUrl), extract(@"([^.]+\.[^.]+)$", 1, RemoteUrl),  // Extract root domain from URL
+        isnotempty(RemoteIP), strcat("IP_", split(RemoteIP, ".")[0], ".", split(RemoteIP, ".")[1]),  // IP subnet grouping
+        "unknown"
+    ),
+    SubdomainLength = case(
+        isnotempty(RemoteUrl), strlen(split(RemoteUrl, ".")[0]),  // Length of subdomain
+        0  // No subdomain for IP addresses
+    ),
+    SubdomainPattern = case(
+        isnotempty(RemoteUrl), split(RemoteUrl, ".")[0],  // First subdomain part
+        ""
+    )
+// Calculate characteristics for both domain and IP-based detection
+| extend 
+    HasNumbers = case(
+        isnotempty(RemoteUrl), SubdomainPattern matches regex @"\d",
+        false
+    ),
+    HasRandomPattern = case(
+        isnotempty(RemoteUrl), SubdomainLength >= 8 and SubdomainPattern matches regex @"^[a-z0-9]{8,}$",
+        false
+    ),
+    IsShortRootDomain = case(
+        isnotempty(RemoteUrl), strlen(DomainRoot) <= 10,
+        false
+    ),
+    ContainsRandomChars = case(
+        isnotempty(RemoteUrl), SubdomainPattern matches regex @"[qxzjk]{2,}|[0-9]{3,}",
+        false
+    ),
+    // IP-based suspicious indicators
+    IsSuspiciousIPRange = case(
+        IsIPAddress, RemoteIP matches regex @"^(10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.|169\.254\.|224\.|240\.)",  // Private/multicast ranges used suspiciously for DNS
+        false
+    ),
+    IsUncommonDNSPort = RemotePort != 53,  // Non-standard DNS ports
+    HasHighFrequencyToSameIP = true  // Will be calculated in summarize
+| summarize 
+    DNSQueryCount = count(),
+    UniqueDomains = case(
+        any(isnotempty(RemoteUrl)), dcount(RemoteUrl),  // Count unique domains if URLs available
+        dcount(RemoteIP)  // Count unique IPs if no URLs
+    ),
+    UniqueIPs = dcount(RemoteIP),
+    UniqueSubdomains = case(
+        any(isnotempty(RemoteUrl)), dcount(SubdomainPattern),
+        0
+    ),
+    DomainRoots = make_set(DomainRoot),
+    SuspiciousDomains = case(
+        any(isnotempty(RemoteUrl)), make_set(RemoteUrl),
+        make_set(RemoteIP)
+    ),
+    RandomPatterns = countif(HasRandomPattern),
+    NumericDomains = countif(HasNumbers),
+    ShortRootDomains = countif(IsShortRootDomain),
+    RandomCharDomains = countif(ContainsRandomChars),
+    SuspiciousIPConnections = countif(IsSuspiciousIPRange),
+    NonStandardPorts = countif(IsUncommonDNSPort),
+    FirstDNSTime = min(TimeGenerated),
+    LastDNSTime = max(TimeGenerated),
+    QueryFrequency = count() / (datetime_diff('hour', max(TimeGenerated), min(TimeGenerated)) + 1),
+    TopRemoteIPs = make_set(RemoteIP),
+    QueryDistribution = bin(count(), 5)  // Group query counts for pattern analysis
+    by DeviceName, InitiatingProcessAccountName, InitiatingProcessFileName
+// Filter for suspicious patterns (adapted for IP-based detection)
+| where DNSQueryCount >= MinBeaconCount and 
+        (UniqueDomains >= MinDomainVariations or 
+         UniqueIPs >= 5 or  // Multiple DNS servers contacted
+         RandomPatterns >= 3 or 
+         (NumericDomains >= 5 and ShortRootDomains >= 3) or
+         SuspiciousIPConnections >= 3 or  // Suspicious IP ranges
+         NonStandardPorts >= 2)  // Non-standard DNS ports
+// Calculate suspicion score (adapted for mixed domain/IP analysis)
+| extend SuspicionScore = 
+    DNSQueryCount * 0.1 + 
+    UniqueDomains * 2 + 
+    UniqueIPs * 1.5 +  // Bonus for multiple DNS servers
+    RandomPatterns * 3 + 
+    NumericDomains * 1.5 + 
+    RandomCharDomains * 2 +
+    SuspiciousIPConnections * 4 +  // High weight for suspicious IP patterns
+    NonStandardPorts * 3 +  // High weight for non-standard ports
+    QueryFrequency * 2
+| where SuspicionScore >= 12  // Lowered threshold to account for IP-based detection
+| project 
+    AlertTime = LastDNSTime,
+    Severity = case(
+        SuspicionScore >= 20, "High",
+        "Medium"
+    ),
+    BeaconingDevice = DeviceName,
+    SuspiciousProcess = InitiatingProcessFileName,
+    ProcessAccount = InitiatingProcessAccountName,
+    BeaconMetrics = strcat("Queries: ", DNSQueryCount, " | Targets: ", UniqueDomains, " | IPs: ", UniqueIPs, " | Frequency: ", round(QueryFrequency, 2), "/hr"),
+    DGAIndicators = case(
+        UniqueDomains > 0, strcat("Random: ", RandomPatterns, " | Numeric: ", NumericDomains, " | RandomChars: ", RandomCharDomains),
+        strcat("IP-based: SuspiciousRanges: ", SuspiciousIPConnections, " | NonStdPorts: ", NonStandardPorts)
+    ),
+    BeaconDuration = datetime_diff('hour', LastDNSTime, FirstDNSTime),
+    SuspiciousTargets = case(
+        array_length(SuspiciousDomains) > 0, strcat_array(array_slice(SuspiciousDomains, 0, 10), ", "),
+        strcat_array(array_slice(TopRemoteIPs, 0, 10), ", ")
+    ),
+    DomainRoots,
+    SuspicionScore, QueryFrequency
+| sort by SuspicionScore desc;
+
+//==============================================================================
+
+// Query 2: Netskope-based Domain Beaconing and Tunneling Detection
+// Severity: Medium
+// Detects suspicious domain access patterns through Netskope connection logs
+
+let NetskopeBeaconWindow = 6h;
+let MinConnectionCount = 15;  // Minimum connections to consider beaconing
+
+// Step 1: Analyze Netskope Connection Patterns for Beaconing
+let NetskopeBeaconing = NetskopeEventsConnection_CL
+| where TimeGenerated >= ago(NetskopeBeaconWindow)
+| where isnotempty(domain) and isnotempty(hostname)
+| where traffic_type == "Web" and dstport in (80, 443, 53, 8080, 8443)  // Common C2 ports including DNS
+// Focus on suspicious connection characteristics
+| where bypass_traffic == "yes" or ssl_decrypt_policy == "no"  // Bypassed or encrypted traffic
+| where not(domain has_any (
+    "microsoft", "google", "amazon", "apple", "adobe", "zoom", "teams", 
+    "office365", "onedrive", "sharepoint", "windows", "azure"
+))  // Exclude common business domains
+// Analyze domain patterns for DGA-like behavior
+| extend 
+    DomainLength = strlen(domain),
+    SubdomainCount = array_length(split(domain, ".")),
+    FirstSubdomain = split(domain, ".")[0],
+    SubdomainLength = strlen(split(domain, ".")[0]),
+    TopLevelDomain = split(domain, ".")[-1]
+| extend
+    HasSuspiciousLength = SubdomainLength >= 10 or DomainLength >= 20,
+    HasRandomPattern = FirstSubdomain matches regex @"^[a-z0-9]{10,}$",
+    HasNumericPattern = FirstSubdomain matches regex @"\d{3,}",
+    IsUncommonTLD = TopLevelDomain in ("tk", "ml", "ga", "cf", "pw", "top", "click", "download"),
+    HasLowCCL = ccl in ("poor", "low", "unknown")
+| summarize 
+    ConnectionCount = count(),
+    UniqueDomains = dcount(domain),
+    UniqueHostnames = dcount(hostname),
+    TotalBytes = sum(numbytes),
+    AverageBytes = avg(numbytes),
+    ConnectionDuration = sum(conn_duration),
+    SuspiciousLengthDomains = countif(HasSuspiciousLength),
+    RandomPatternDomains = countif(HasRandomPattern),
+    NumericPatternDomains = countif(HasNumericPattern),
+    UncommonTLDs = countif(IsUncommonTLD),
+    LowCCLConnections = countif(HasLowCCL),
+    DomainsAccessed = make_set(domain),
+    FirstConnectionTime = min(TimeGenerated),
+    LastConnectionTime = max(TimeGenerated),
+    ConnectionFrequency = count() / (datetime_diff('hour', max(TimeGenerated), min(TimeGenerated)) + 1)
+    by ur_normalized, srcip, device, useragent
+// Filter for suspicious beaconing patterns
+| where ConnectionCount >= MinConnectionCount and 
+        (UniqueDomains >= 5 or 
+         RandomPatternDomains >= 3 or 
+         UncommonTLDs >= 2 or
+         LowCCLConnections >= 5)
+// Calculate beaconing risk score
+| extend BeaconRiskScore = 
+    ConnectionCount * 0.2 + 
+    UniqueDomains * 3 + 
+    RandomPatternDomains * 4 + 
+    NumericPatternDomains * 2 + 
+    UncommonTLDs * 3 +
+    LowCCLConnections * 2 +
+    ConnectionFrequency * 1.5
+| where BeaconRiskScore >= 20  // Medium risk threshold
+| project 
+    AlertTime = LastConnectionTime,
+    Severity = "Medium",
+    BeaconingUser = ur_normalized,
+    SourceDevice = device,
+    SourceIP = srcip,
+    UserAgent = useragent,
+    BeaconPattern = strcat("Connections: ", ConnectionCount, " | Domains: ", UniqueDomains, " | Frequency: ", round(ConnectionFrequency, 2), "/hr"),
+    SuspiciousIndicators = strcat("RandomPatterns: ", RandomPatternDomains, " | NumericPatterns: ", NumericPatternDomains, " | UncommonTLDs: ", UncommonTLDs),
+    DataTransfer = strcat("Total: ", TotalBytes, "B | Average: ", round(AverageBytes, 0), "B | Duration: ", ConnectionDuration, "s"),
+    BeaconDuration = datetime_diff('hour', LastConnectionTime, FirstConnectionTime),
+    SuspiciousDomains = strcat_array(array_slice(DomainsAccessed, 0, 15), ", "),  // Show first 15 domains
+    BeaconRiskScore, ConnectionFrequency
+| sort by BeaconRiskScore desc;
+
+//==============================================================================
+
+// Query 3: Cross-Platform DNS Tunneling Detection
+// Severity: Medium
+// Combines DeviceNetworkEvents and Netskope to detect DNS tunneling and data exfiltration
+
+let TunnelingWindow = 8h;
+// Step 1: Detect DNS Tunneling via Large/Frequent DNS Queries
+let DNSTunneling = DeviceNetworkEvents
+| where TimeGenerated >= ago(TunnelingWindow)
+| where ActionType == "DnsConnectionInspected" and Protocol == "Udp" and RemotePort == 53
+| where RemoteIPType == "Public" and isnotempty(RemoteUrl)
+// Look for DNS tunneling indicators
+| extend 
+    DomainLength = strlen(RemoteUrl),
+    SubdomainLength = strlen(split(RemoteUrl, ".")[0]),
+    LabelCount = array_length(split(RemoteUrl, "."))
+// DNS tunneling often uses long subdomains and specific patterns
+| where DomainLength >= 30 or SubdomainLength >= 15 or LabelCount >= 5
+| where not(RemoteUrl has_any ("microsoft", "google", "amazon", "cloudflare", "quad9"))
+| summarize 
+    TunnelingQueries = count(),
+    UniqueTunnelingDomains = dcount(RemoteUrl),
+    LongDomains = make_set(RemoteUrl),
+    FirstTunnelingTime = min(TimeGenerated),
+    LastTunnelingTime = max(TimeGenerated),
+    TunnelingFrequency = count() / (datetime_diff('hour', max(TimeGenerated), min(TimeGenerated)) + 1)
+    by DeviceName, InitiatingProcessAccountName, InitiatingProcessFileName
+| where TunnelingQueries >= 5  // Multiple potential tunneling queries
+| extend TunnelingUser = InitiatingProcessAccountName, TunnelingDevice = DeviceName;
+// Step 2: Correlate with Netskope High-Volume Data Transfers
+let HighVolumeTransfers = NetskopeEventsConnection_CL
+| where TimeGenerated >= ago(TunnelingWindow)
+| where numbytes > 1048576  // Transfers larger than 1MB
+| where traffic_type == "Web" and not(site has_any ("microsoft", "office365", "google", "teams"))
+| summarize 
+    HighVolumeConnections = count(),
+    TotalDataTransfer = sum(numbytes),
+    TransferSites = make_set(site),
+    FirstTransferTime = min(TimeGenerated),
+    LastTransferTime = max(TimeGenerated)
+    by ur_normalized, srcip
+| where TotalDataTransfer > 10485760  // More than 10MB total
+| extend TransferUser = ur_normalized;
+// Step 3: Correlate DNS Tunneling with High-Volume Transfers
+DNSTunneling
+| join kind=inner (HighVolumeTransfers) on $left.TunnelingUser == $right.TransferUser
+| where abs(datetime_diff('hour', FirstTransferTime, FirstTunnelingTime)) <= 4  // Within 4-hour window
+| extend TunnelingRiskScore = 
+    TunnelingQueries * 2 + 
+    UniqueTunnelingDomains * 3 + 
+    HighVolumeConnections * 2 +
+    (TotalDataTransfer / 1048576)  // MB transferred
+| project 
+    AlertTime = iff(LastTransferTime > LastTunnelingTime, LastTransferTime, LastTunnelingTime),
+    Severity = "Medium",
+    SuspiciousUser = TunnelingUser,
+    TunnelingPhase = strcat("DNS Queries: ", TunnelingQueries, " | Domains: ", UniqueTunnelingDomains, " | Frequency: ", round(TunnelingFrequency, 2), "/hr"),
+    DataExfilPhase = strcat("Connections: ", HighVolumeConnections, " | Transfer: ", round(TotalDataTransfer / 1048576, 2), "MB"),
+    CorrelationWindow = abs(datetime_diff('hour', FirstTransferTime, FirstTunnelingTime)),
+    LongDomains = strcat_array(array_slice(LongDomains, 0, 5), ", "),  // Show first 5 long domains
+    TransferSites,
+    TunnelingRiskScore, TunnelingDevice
+| where TunnelingRiskScore >= 15  // Combined risk threshold
+| sort by TunnelingRiskScore desc;
+//==============================================================================
+
+// Query 4: Infoblox NIOS - TXT Beaconing and Random Subdomain Patterns (Infoblox-only)
+// Severity: Medium / High
+// Uses only Infoblox_NIOS_ParsedData to flag repeated TXT queries and DGA-like subdomains by client
+
+let InfobloxWindow = 6h;
+let MinTxtCount = 6;
+let MinRandomLen = 10;
+let MinUniqueRoots = 3;
+let InfobloxTXTBeaconing = Infoblox_NIOS_ParsedData
+| where TimeGenerated >= ago(InfobloxWindow)
+| where Log_Type == "client" and EventSubType == "request" and EventType in ("Query", "QUERY")
+| where isnotempty(DnsQuery)
+| where not(DnsQuery has_any ("microsoft", "windows", "office", "office365", "google", "apple", "zoom", "teams", "adobe", "amazon", "cloudflare"))
+| extend FirstLabel = tostring(split(DnsQuery, ".")[0])
+| extend RootDomain = iff(indexof(DnsQuery, ".") > 0, extract(@"([^.]+\.[^.]+)$", 1, DnsQuery), DnsQuery)
+| extend LabelLen = strlen(FirstLabel)
+| extend HasNumeric = FirstLabel matches regex @"\d{3,}"
+| extend HasMixed = FirstLabel matches regex @"[a-z].*\d|\d.*[a-z]"
+| extend IsRandomish = FirstLabel matches regex @"^[a-z0-9]{10,}$"
+| extend IsTXT = DnsQueryType == "TXT"
+| summarize
+    TotalQueries = count(),
+    TxtQueries = countif(IsTXT),
+    UniqueRoots = dcount(RootDomain),
+    UniqueQueries = dcount(DnsQuery),
+    RandomishLabels = countif(IsRandomish),
+    NumericLabels = countif(HasNumeric),
+    MixedLabels = countif(HasMixed),
+    LongLabels = countif(LabelLen >= MinRandomLen),
+    Roots = make_set(RootDomain, 15),
+    SampleQueries = make_set(DnsQuery, 15),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated),
+    QueryFreqPerHr = count() / (datetime_diff('hour', max(TimeGenerated), min(TimeGenerated)) + 1)
+    by SrcIpAddr
+| where TxtQueries >= MinTxtCount or (RandomishLabels >= 3 and UniqueRoots >= MinUniqueRoots) or LongLabels >= 5
+| extend SuspicionScore = TxtQueries * 1.5 + RandomishLabels * 3 + NumericLabels * 1.5 + MixedLabels * 1.5 + LongLabels * 1.5 + UniqueRoots * 2 + QueryFreqPerHr * 2
+| where SuspicionScore >= 12
+| project
+    AlertTime = LastSeen,
+    Severity = iff(SuspicionScore >= 22, "High", "Medium"),
+    BeaconingDevice = SrcIpAddr,
+    SuspiciousProcess = "",
+    ProcessAccount = "",
+    BeaconMetrics = strcat("Total: ", TotalQueries, " | TXT: ", TxtQueries, " | Roots: ", UniqueRoots, " | Freq: ", round(QueryFreqPerHr, 2), "/hr"),
+    DGAIndicators = strcat("Randomish: ", RandomishLabels, " | Numeric: ", NumericLabels, " | Long: ", LongLabels),
+    BeaconDuration = datetime_diff('hour', LastSeen, FirstSeen),
+    SuspiciousDomains = strcat_array(array_slice(SampleQueries, 0, 10), ", "),
+    DomainRoots = Roots,
+    SuspicionScore,
+    QueryFrequency = QueryFreqPerHr
+| sort by SuspicionScore desc;
+
+//==============================================================================
+
+// Query 5: Infoblox NIOS + Endpoint Correlation (DeviceNetworkEvents)
+// Severity: Medium
+// Correlates Infoblox suspicious patterns with endpoint DNS events to add process and device context
+
+let InfobloxCorrWindow = 6h;
+let InfobloxSuspiciousSeeds = Infoblox_NIOS_ParsedData
+| where TimeGenerated >= ago(InfobloxCorrWindow)
+| where Log_Type == "client" and EventSubType == "request" and isnotempty(DnsQuery)
+| extend FirstLabel = tostring(split(DnsQuery, ".")[0])
+| extend RootDomain = iff(indexof(DnsQuery, ".") > 0, extract(@"([^.]+\.[^.]+)$", 1, DnsQuery), DnsQuery)
+| extend LabelLen = strlen(FirstLabel), IsRandomish = FirstLabel matches regex @"^[a-z0-9]{10,}$", HasNumeric = FirstLabel matches regex @"\d{3,}"
+| summarize SeedCount = count(), TxtCount = countif(DnsQueryType == "TXT"), Randomish = countif(IsRandomish), Numeric = countif(HasNumeric), LongLabels = countif(LabelLen >= 10), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated)
+    by SrcIpAddr, RootDomain
+| where TxtCount >= 3 or Randomish >= 2 or LongLabels >= 3;
+
+let EndpointDNS = DeviceNetworkEvents
+| where TimeGenerated >= ago(InfobloxCorrWindow)
+| where ActionType == "DnsConnectionInspected" and RemotePort == 53 and isnotempty(RemoteUrl)
+| extend DomainRoot = extract(@"([^.]+\.[^.]+)$", 1, RemoteUrl)
+| project DNE_Time = TimeGenerated, DeviceName, InitiatingProcessFileName, InitiatingProcessAccountName, RemoteUrl, RemoteIP, DomainRoot;
+
+let InfobloxCorrelatedBeaconing = InfobloxSuspiciousSeeds
+| join kind=innerunique (EndpointDNS) on $left.RootDomain == $right.DomainRoot
+| where abs(datetime_diff('minute', DNE_Time, LastSeen)) <= 10 or abs(datetime_diff('minute', DNE_Time, FirstSeen)) <= 10
+| summarize
+    TotalSeeds = sum(SeedCount),
+    TotalTXT = sum(TxtCount),
+    RandomishLabels = sum(Randomish),
+    NumericLabels = sum(Numeric),
+    LongLabels = sum(LongLabels),
+    UniqueRemoteIPs = dcount(RemoteIP),
+    RemoteIPs = make_set(RemoteIP, 10),
+    FirstSeen = min(FirstSeen),
+    LastSeen = max(LastSeen),
+    Events = count()
+    by DeviceName, InitiatingProcessFileName, InitiatingProcessAccountName, RootDomain
+| extend QueryFrequency = Events / (datetime_diff('hour', LastSeen, FirstSeen) + 1)
+| extend SuspicionScore = TotalTXT * 1.5 + RandomishLabels * 3 + NumericLabels * 1.5 + LongLabels * 1.5 + UniqueRemoteIPs * 1.5 + QueryFrequency * 2
+| where SuspicionScore >= 12
+| project
+    AlertTime = LastSeen,
+    Severity = "Medium",
+    BeaconingDevice = DeviceName,
+    SuspiciousProcess = InitiatingProcessFileName,
+    ProcessAccount = InitiatingProcessAccountName,
+    BeaconMetrics = strcat("Seeds: ", TotalSeeds, " | TXT: ", TotalTXT, " | UniqueIPs: ", UniqueRemoteIPs, " | Freq: ", round(QueryFrequency, 2), "/hr"),
+    DGAIndicators = strcat("Randomish: ", RandomishLabels, " | Numeric: ", NumericLabels, " | Long: ", LongLabels),
+    BeaconDuration = datetime_diff('hour', LastSeen, FirstSeen),
+    SuspiciousDomains = RootDomain,
+    DomainRoots = RemoteIPs,
+    SuspicionScore,
+    QueryFrequency
+| sort by SuspicionScore desc;
+// Union all three queries for comprehensive coverage
+DNSBeaconingActivity
+| union (NetskopeBeaconing)
+| union (
+    DNSTunneling 
+    | join kind=inner (HighVolumeTransfers) on $left.TunnelingUser == $right.TransferUser
+    | where abs(datetime_diff('hour', FirstTransferTime, FirstTunnelingTime)) <= 4
+    | extend TunnelingRiskScore = TunnelingQueries * 2 + UniqueTunnelingDomains * 3 + HighVolumeConnections * 2 + (TotalDataTransfer / 1048576)
+    | project AlertTime = iff(LastTransferTime > LastTunnelingTime, LastTransferTime, LastTunnelingTime), Severity = "Medium", BeaconingDevice = TunnelingDevice, SuspiciousProcess = InitiatingProcessFileName, ProcessAccount = TunnelingUser, BeaconMetrics = strcat("DNS Tunneling: ", TunnelingQueries, " queries"), DGAIndicators = "DNS Tunneling Detected", BeaconDuration = datetime_diff('hour', LastTunnelingTime, FirstTunnelingTime), SuspiciousDomains = strcat_array(array_slice(LongDomains, 0, 5), ", "), DomainRoots = TransferSites, SuspicionScore = TunnelingRiskScore, QueryFrequency = TunnelingFrequency
+    | where TunnelingRiskScore >= 15
+)
+| union (InfobloxTXTBeaconing)
+| union (InfobloxCorrelatedBeaconing)
+| sort by 
+    case(Severity == "High", 1, 2),  // Sort High severity first
+    iff(isnotnull(SuspicionScore), SuspicionScore, BeaconRiskScore) desc;
+
+// Name: Beaconing via DNS TXT/Random Subdomain Patterns
+// severity: Medium / High
+// Description: Flags repeated DNS TXT queries or randomized subdomain patterns (DGA-like) from internal devices.
