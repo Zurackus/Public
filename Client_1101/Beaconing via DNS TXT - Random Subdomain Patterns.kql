@@ -426,13 +426,12 @@ DNSBeaconingActivity
 // Severity: Medium / High
 // Uses raw Syslog parsing to detect TXT beaconing and DGA-like patterns from internal clients
 
+// Parse Request Logs
+let lookback_ = ago(1d);
 let InfobloxClientWindow = 6h;
-let MinTxtBeaconCount = 8;
-let MinDGAVariations = 4;
-let MinRandomLen = 12;
-
-let InfobloxDNSClientBeaconing = 
-let lookback_ = ago(InfobloxClientWindow);
+let MinTxtBeaconCount = 15;  // Increased from 8 to reduce volume-based false positives
+let MinDGAVariations = 3;   // Reduced to catch smaller DGA campaigns  
+let MinRandomLen = 10;      // Reduced to catch shorter random patterns
 let Infoblox_NIOS_ParsedData =
     Syslog
     | where TimeGenerated >= lookback_
@@ -465,9 +464,23 @@ Infoblox_NIOS_ParsedData
 | where ipv4_is_private(SrcIpAddr) == true and isnotempty(DnsQuery)
 // Exclude common legitimate domains and TXT records
 | extend RootDomain = iff(indexof(DnsQuery, ".") > 0, extract(@"([^.]+\.[^.]+)$", 1, DnsQuery), DnsQuery)
-| where not(RootDomain has_any ("internaldomain.com", "localdomain", "example.com"))  // Exclude internal or example domains
+| where not(RootDomain has_any ("domain.edu", "local./")) and DnsQuery !startswith "_aaplcache" // Exclude internal or example domains
 | where not(DnsQuery has_any ("microsoft", "windows", "office", "office365", "google", "apple", "zoom", "teams", "adobe", "amazon", "cloudflare"))
 | where not(DnsQuery startswith "_dmarc." or DnsQuery startswith "_spf." or DnsQuery startswith "_domainkey." or DnsQuery startswith "_acme-challenge." or DnsQuery startswith "_mta-sts.")
+// Extended legitimate service exclusions based on results analysis
+| where not(RootDomain has_any (
+    "logicmonitor.com",      // LogicMonitor monitoring service
+    "nssvc.net",             // Network services
+    "aaplimg.com",           // Apple image/time services  
+    "powerdns.com",          // PowerDNS security updates
+    "clamav.net",            // ClamAV antivirus updates
+    "googleapis.com",        // Google APIs including Firebase
+    "extrahop.com",          // ExtraHop network monitoring
+    "smaato.net",            // Smaato mobile advertising SDK
+    "oath.cloud"             // Yahoo/Verizon services
+))
+| where not(DnsQuery startswith "_grpc_config." or DnsQuery startswith "_wms_" or DnsQuery startswith "current.cvd.")  // Service configs and updates
+| where not(DnsQuery contains "time.apple.com" or DnsQuery contains "time.g.aaplimg.com")  // Apple time services
 | extend FirstLabel = tostring(split(DnsQuery, ".")[0])
 | extend LabelLen = strlen(FirstLabel)
 // DGA and beaconing pattern detection
@@ -494,28 +507,34 @@ Infoblox_NIOS_ParsedData
     LastQueryTime = max(TimeGenerated),
     QueryFrequencyPerHr = count() / (datetime_diff('hour', max(TimeGenerated), min(TimeGenerated)) + 1)
     by SrcIpAddr
-// Filter for TXT beaconing or DGA patterns
-| where TotalTXTQueries >= MinTxtBeaconCount 
+// Filter for TXT beaconing or DGA patterns with improved thresholds
+| where (TotalTXTQueries >= MinTxtBeaconCount and UniqueRootDomains >= 2)  // Require domain diversity for high-volume TXT
        or (RandomishCount >= 3 and UniqueRootDomains >= MinDGAVariations)
        or (LongLabelCount >= 5 and UniqueRootDomains >= 3)
-       or (NumericClusterCount >= 4 and MixedPatternCount >= 3)
-// Calculate comprehensive suspicion score
+       or (NumericClusterCount >= 4 and MixedPatternCount >= 3 and UniqueRootDomains >= 2)
+// Add additional filters to reduce false positives
+| where not(UniqueRootDomains == 1 and TotalTXTQueries > 50 and RandomishCount == 0 and NumericClusterCount == 0)  // Exclude high-volume single domain legitimate services
+// Calculate comprehensive suspicion score with adjusted weights
 | extend SuspicionScore = 
-    TotalTXTQueries * 2.0 +                    // Heavy weight for TXT volume
-    RandomishCount * 4.0 +                     // High weight for DGA patterns
-    NumericClusterCount * 2.5 +                // Moderate weight for numeric clusters
-    MixedPatternCount * 2.0 +                  // Mixed alphanumeric patterns
-    SuspiciousCharCount * 3.0 +                // Suspicious character patterns
-    LongLabelCount * 1.5 +                     // Long subdomain labels
-    UniqueRootDomains * 2.5 +                  // Domain variety (beaconing indicator)
-    QueryFrequencyPerHr * 1.5 +                // Query frequency
-    ShortTLDCount * 1.0                        // Uncommon TLD usage
-| where SuspicionScore >= 15  // Adjusted threshold for TXT-focused detection
+    // Reduce weight for pure volume, increase weight for diversity and suspicious patterns
+    TotalTXTQueries * 1.0 +                    // Reduced weight for TXT volume
+    RandomishCount * 5.0 +                     // Increased weight for DGA patterns
+    NumericClusterCount * 2.0 +                // Reduced weight for numeric clusters (many false positives)
+    MixedPatternCount * 1.5 +                  // Reduced weight for mixed patterns (many false positives)
+    SuspiciousCharCount * 4.0 +                // High weight for truly suspicious character patterns
+    LongLabelCount * 2.0 +                     // Moderate weight for long subdomain labels
+    UniqueRootDomains * 4.0 +                  // Increased weight for domain variety (key beaconing indicator)
+    QueryFrequencyPerHr * 1.0 +                // Reduced weight for frequency
+    ShortTLDCount * 2.0 +                      // Increased weight for uncommon TLD usage
+    // Bonus for truly suspicious combinations
+    iff(UniqueRootDomains >= 5 and RandomishCount >= 2, 10.0, 0.0) +  // Multi-domain DGA bonus
+    iff(TotalTXTQueries >= 50 and UniqueRootDomains >= 3, 5.0, 0.0)   // Multi-domain beaconing bonus
+| where SuspicionScore >= 20  // Increased threshold to reduce false positives
 | project
     AlertTime = LastQueryTime,
     Severity = case(
-        SuspicionScore >= 30, "High",
-        SuspicionScore >= 20, "Medium",
+        SuspicionScore >= 40, "High",
+        SuspicionScore >= 25, "Medium", 
         "Low"
     ),
     BeaconingDevice = SrcIpAddr,
@@ -529,7 +548,3 @@ Infoblox_NIOS_ParsedData
     SuspicionScore,
     QueryFrequency = QueryFrequencyPerHr
 | sort by SuspicionScore desc;
-
-// Name: Beaconing via DNS TXT/Random Subdomain Patterns
-// severity: Medium / High
-// Description: Flags repeated DNS TXT queries or randomized subdomain patterns (DGA-like) from internal devices.
