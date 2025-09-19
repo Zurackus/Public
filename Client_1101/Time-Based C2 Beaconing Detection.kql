@@ -39,10 +39,17 @@ DeviceNetworkEvents
     by DeviceName, RemoteIP, RemotePort, InitiatingProcessId, InitiatingProcessFileName
 | where ConnectionCount >= minBeaconCount
 | extend Duration = datetime_diff('second', LastConnection, FirstConnection)
-// Calculate intervals between connections
-| extend Intervals = 
-    range(0, array_length(ConnectionTimes) - 2, 1)
-    | project datetime_diff('second', ConnectionTimes[i+1], ConnectionTimes[i])
+// Calculate intervals between connections using mv-expand and next()
+| mv-expand ConnectionTime = ConnectionTimes to typeof(datetime)
+| sort by DeviceName, RemoteIP, RemotePort, InitiatingProcessId, ConnectionTime asc
+| extend NextConnectionTime = next(ConnectionTime, 1)
+| extend IntervalSeconds = datetime_diff('second', NextConnectionTime, ConnectionTime)
+| where isnotnull(IntervalSeconds) and IntervalSeconds > 0
+| summarize 
+    Intervals = make_list(IntervalSeconds),
+    ConnectionCount = count() + 1,  // Add 1 since we lose the last connection in interval calculation
+    take_any(FirstConnection, LastConnection, ProcessInfo, InitiatingProcessAccountName, InitiatingProcessFolderPath, Duration)
+    by DeviceName, RemoteIP, RemotePort, InitiatingProcessId, InitiatingProcessFileName
 | where array_length(Intervals) > 0
 // Statistical analysis of intervals
 | extend 
@@ -105,10 +112,17 @@ DeviceNetworkEvents
     LastNetwork = max(TimeGenerated)
     by DeviceName, ProcessId, FileName, FolderPath, ProcessVersionInfoCompanyName
 | where ConnectionCount >= minConnections
-// Calculate connection intervals
-| extend NetworkIntervals = 
-    range(0, array_length(NetworkConnections) - 2, 1)
-    | project datetime_diff('second', NetworkConnections[i+1], NetworkConnections[i])
+// Calculate connection intervals using mv-expand and next()
+| mv-expand NetworkConnection = NetworkConnections to typeof(datetime)
+| sort by DeviceName, ProcessId, NetworkConnection asc
+| extend NextNetworkConnection = next(NetworkConnection, 1)
+| extend IntervalSeconds = datetime_diff('second', NextNetworkConnection, NetworkConnection)
+| where isnotnull(IntervalSeconds) and IntervalSeconds > 0
+| summarize 
+    NetworkIntervals = make_list(IntervalSeconds),
+    ActualConnectionCount = count() + 1,  // Add 1 since we lose the last connection in interval calculation
+    take_any(ConnectionCount, UniqueDestinations, DestinationSample, FirstNetwork, LastNetwork, FileName, FolderPath, ProcessVersionInfoCompanyName)
+    by DeviceName, ProcessId
 | where array_length(NetworkIntervals) > 2
 | extend 
     AvgNetworkInterval = todouble(array_sum(NetworkIntervals)) / array_length(NetworkIntervals),
@@ -163,10 +177,17 @@ NetskopeEventsConnection_CL
     take_any(app, site, hostname, useragent)
     by ur_normalized, dstip, dstport
 | where SessionCount >= minWebConnections
-// Calculate timing intervals
-| extend SessionIntervals = 
-    range(0, array_length(SessionTimes) - 2, 1)
-    | project datetime_diff('second', SessionTimes[i+1], SessionTimes[i])
+// Calculate timing intervals using mv-expand and next()
+| mv-expand SessionTime = SessionTimes to typeof(datetime)
+| sort by ur_normalized, dstip, dstport, SessionTime asc
+| extend NextSessionTime = next(SessionTime, 1)
+| extend IntervalSeconds = datetime_diff('second', NextSessionTime, SessionTime)
+| where isnotnull(IntervalSeconds) and IntervalSeconds > 0
+| summarize 
+    SessionIntervals = make_list(IntervalSeconds),
+    ActualSessionCount = count() + 1,  // Add 1 since we lose the last session in interval calculation
+    take_any(SessionCount, ClientBytes, ServerBytes, TransactionCounts, FirstSession, LastSession, app, site, hostname, useragent)
+    by ur_normalized, dstip, dstport
 | where array_length(SessionIntervals) > 0
 // Analyze data transfer patterns
 | extend 
