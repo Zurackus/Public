@@ -1,0 +1,213 @@
+// =============================================================================
+// Time-Based C2 Beaconing Detection Rules
+// =============================================================================
+// Author: Security Detection Engineering
+// Description: Multiple detection approaches for C2 beaconing based on timing patterns
+// Reference: Netskope C2 Beaconing Detection White Paper
+// Tables: DeviceNetworkEvents, NetskopeEventsConnection_CL, DeviceProcessEvents
+// =============================================================================
+
+// =============================================================================
+// DETECTION 1: Network Connection Time-Based Beaconing (Primary Detection)
+// =============================================================================
+// Description: Detects regular outbound network connections at consistent intervals
+// Focus: External connections with predictable timing patterns
+// Confidence: High (low false positive rate)
+//
+let lookback = 24h;
+let minBeaconCount = 8;           // Minimum number of connections to consider beaconing
+let maxJitterPercent = 15;        // Allow 15% variance in timing intervals
+let minIntervalSeconds = 30;      // Minimum interval to avoid noise from legitimate apps
+let maxIntervalSeconds = 3600;    // Maximum interval (1 hour) to focus on active beaconing
+//
+DeviceNetworkEvents
+| where TimeGenerated >= ago(lookback)
+| where ActionType == "ConnectionSuccess"
+| where RemoteIPType == "Public"  // Focus on external connections
+| where RemotePort in (80, 443, 8080, 8443, 53)  // Common C2 ports
+// Exclude common legitimate services
+| where not(RemoteUrl has_any ("microsoft", "google", "apple", "adobe", "mozilla", "update"))
+| where not(InitiatingProcessFileName in~ ("svchost.exe", "winlogon.exe", "csrss.exe"))
+// Group by connection characteristics
+| summarize 
+    ConnectionTimes = make_list(TimeGenerated),
+    ConnectionCount = count(),
+    FirstConnection = min(TimeGenerated),
+    LastConnection = max(TimeGenerated),
+    ProcessInfo = strcat(InitiatingProcessFileName, " (", InitiatingProcessCommandLine, ")"),
+    take_any(InitiatingProcessAccountName, InitiatingProcessFolderPath)
+    by DeviceName, RemoteIP, RemotePort, InitiatingProcessId, InitiatingProcessFileName
+| where ConnectionCount >= minBeaconCount
+| extend Duration = datetime_diff('second', LastConnection, FirstConnection)
+// Calculate intervals between connections
+| extend Intervals = 
+    range(0, array_length(ConnectionTimes) - 2, 1)
+    | project datetime_diff('second', ConnectionTimes[i+1], ConnectionTimes[i])
+| where array_length(Intervals) > 0
+// Statistical analysis of intervals
+| extend 
+    AvgInterval = todouble(array_sum(Intervals)) / array_length(Intervals),
+    MedianInterval = percentile_tdigest(make_tdigest(Intervals), 50),
+    StdDevInterval = stdev_tdigest(make_tdigest(Intervals))
+// Filter for consistent timing patterns
+| where AvgInterval between (minIntervalSeconds .. maxIntervalSeconds)
+| where StdDevInterval <= (AvgInterval * maxJitterPercent / 100.0)  // Low jitter indicates beaconing
+// Calculate regularity score
+| extend 
+    RegularityScore = 100 - ((StdDevInterval / AvgInterval) * 100),
+    BeaconFrequency = strcat(round(AvgInterval/60, 1), " minutes"),
+    TotalDuration = strcat(round(Duration/3600, 1), " hours")
+| where RegularityScore >= 80  // High regularity threshold
+| project
+    TimeGenerated = LastConnection,
+    AlertSeverity = "High",
+    DetectionType = "Network Time-Based Beaconing",
+    DeviceName,
+    SuspiciousProcess = ProcessInfo,
+    ProcessPath = InitiatingProcessFolderPath,
+    ProcessAccount = InitiatingProcessAccountName,
+    BeaconTarget = strcat(RemoteIP, ":", RemotePort),
+    BeaconPattern = strcat("Interval: ", BeaconFrequency, " | Connections: ", ConnectionCount, " | Duration: ", TotalDuration),
+    RegularityScore = round(RegularityScore, 1),
+    RiskIndicators = strcat("AvgInterval: ", round(AvgInterval), "s | StdDev: ", round(StdDevInterval, 1), "s")
+
+// =============================================================================
+// DETECTION 2: Process-Based Beaconing with Network Correlation
+// =============================================================================
+// Description: Identifies processes making regular network connections
+// Focus: Suspicious processes with consistent outbound communication patterns
+// Confidence: High (combines process and network behavioral analysis)
+//
+let lookback2 = 12h;
+let minConnections = 6;
+let intervalTolerance = 20;  // 20% tolerance for interval consistency
+//
+let SuspiciousProcesses = 
+    DeviceProcessEvents
+    | where TimeGenerated >= ago(lookback2)
+    | where ProcessVersionInfoCompanyName !in~ ("Microsoft Corporation", "Google LLC", "Adobe Inc.")
+    | where FolderPath !startswith "C:\\Program Files"
+    | where FolderPath !startswith "C:\\Windows\\System32"
+    | summarize ProcessStart = min(TimeGenerated) by DeviceName, ProcessId, FileName, FolderPath, ProcessVersionInfoCompanyName;
+//
+DeviceNetworkEvents
+| where TimeGenerated >= ago(lookback2)
+| where ActionType == "ConnectionSuccess"
+| where RemoteIPType == "Public"
+| join kind=inner SuspiciousProcesses on DeviceName, $left.InitiatingProcessId == $right.ProcessId
+| where TimeGenerated >= ProcessStart  // Ensure network activity after process start
+| summarize 
+    NetworkConnections = make_list(TimeGenerated),
+    ConnectionCount = count(),
+    UniqueDestinations = dcount(RemoteIP),
+    DestinationSample = make_set(strcat(RemoteIP, ":", RemotePort), 5),
+    FirstNetwork = min(TimeGenerated),
+    LastNetwork = max(TimeGenerated)
+    by DeviceName, ProcessId, FileName, FolderPath, ProcessVersionInfoCompanyName
+| where ConnectionCount >= minConnections
+// Calculate connection intervals
+| extend NetworkIntervals = 
+    range(0, array_length(NetworkConnections) - 2, 1)
+    | project datetime_diff('second', NetworkConnections[i+1], NetworkConnections[i])
+| where array_length(NetworkIntervals) > 2
+| extend 
+    AvgNetworkInterval = todouble(array_sum(NetworkIntervals)) / array_length(NetworkIntervals),
+    NetworkStdDev = stdev_tdigest(make_tdigest(NetworkIntervals)),
+    NetworkDuration = datetime_diff('minute', LastNetwork, FirstNetwork)
+| where NetworkStdDev <= (AvgNetworkInterval * intervalTolerance / 100.0)
+| extend ConsistencyScore = 100 - ((NetworkStdDev / AvgNetworkInterval) * 100)
+| where ConsistencyScore >= 75
+| project
+    TimeGenerated = LastNetwork,
+    AlertSeverity = "High",
+    DetectionType = "Process-Network Beaconing",
+    DeviceName,
+    SuspiciousExecutable = FileName,
+    ExecutablePath = FolderPath,
+    ProcessCompany = coalesce(ProcessVersionInfoCompanyName, "Unknown"),
+    BeaconBehavior = strcat("Connections: ", ConnectionCount, " | Avg Interval: ", round(AvgNetworkInterval/60, 1), "min | Duration: ", NetworkDuration, "min"),
+    NetworkTargets = strcat_array(DestinationSample, ", "),
+    ConsistencyScore = round(ConsistencyScore, 1),
+    UniqueDestinations
+
+// =============================================================================
+// DETECTION 3: Web Proxy Beaconing Detection (Netskope)
+// =============================================================================
+// Description: Detects beaconing through web proxy logs using connection patterns
+// Focus: HTTPS traffic with regular timing and consistent data patterns
+// Confidence: Medium-High (requires tuning for environment)
+//
+let lookback3 = 6h;
+let minWebConnections = 5;
+let maxTimingVariance = 25;  // 25% variance allowed
+let minDataConsistency = 70;  // Minimum consistency in data transfer sizes
+//
+NetskopeEventsConnection_CL
+| where TimeGenerated >= ago(lookback3)
+| where traffic_type == "Web"
+| where dstport == 443  // Focus on HTTPS traffic
+| where bypass_traffic == "no"  // Not bypassed traffic
+| where user_generated == "no"  // Non-user generated (automated)
+// Exclude known legitimate applications
+| where not(app has_any ("Microsoft", "Google", "Office 365", "Teams", "OneDrive"))
+| where not(site has_any ("microsoft", "google", "office", "teams", "onedrive"))
+// Group by user and destination
+| summarize 
+    SessionTimes = make_list(TimeGenerated),
+    SessionCount = count(),
+    ClientBytes = make_list(client_bytes),
+    ServerBytes = make_list(server_bytes),
+    TransactionCounts = make_list(http_transaction_count),
+    FirstSession = min(TimeGenerated),
+    LastSession = max(TimeGenerated),
+    take_any(app, site, hostname, useragent)
+    by ur_normalized, dstip, dstport
+| where SessionCount >= minWebConnections
+// Calculate timing intervals
+| extend SessionIntervals = 
+    range(0, array_length(SessionTimes) - 2, 1)
+    | project datetime_diff('second', SessionTimes[i+1], SessionTimes[i])
+| where array_length(SessionIntervals) > 0
+// Analyze data transfer patterns
+| extend 
+    AvgClientBytes = avg_tdigest(make_tdigest(ClientBytes)),
+    AvgServerBytes = avg_tdigest(make_tdigest(ServerBytes)),
+    ClientBytesStdDev = stdev_tdigest(make_tdigest(ClientBytes)),
+    ServerBytesStdDev = stdev_tdigest(make_tdigest(ServerBytes))
+// Timing analysis
+| extend 
+    AvgSessionInterval = todouble(array_sum(SessionIntervals)) / array_length(SessionIntervals),
+    TimingStdDev = stdev_tdigest(make_tdigest(SessionIntervals))
+| where AvgSessionInterval between (60 .. 1800)  // 1 minute to 30 minutes
+| where TimingStdDev <= (AvgSessionInterval * maxTimingVariance / 100.0)
+// Data consistency analysis
+| extend 
+    ClientConsistency = 100 - ((ClientBytesStdDev / AvgClientBytes) * 100),
+    ServerConsistency = 100 - ((ServerBytesStdDev / AvgServerBytes) * 100),
+    OverallConsistency = (ClientConsistency + ServerConsistency) / 2
+| where OverallConsistency >= minDataConsistency
+| extend 
+    TimingScore = 100 - ((TimingStdDev / AvgSessionInterval) * 100),
+    SessionDuration = datetime_diff('minute', LastSession, FirstSession)
+| project
+    TimeGenerated = LastSession,
+    AlertSeverity = "Medium",
+    DetectionType = "Web Proxy Beaconing",
+    User = ur_normalized,
+    BeaconDestination = strcat(coalesce(hostname, dstip), ":", dstport),
+    Application = coalesce(app, "Unknown"),
+    Website = coalesce(site, "Unknown"),
+    BeaconMetrics = strcat("Sessions: ", SessionCount, " | Interval: ", round(AvgSessionInterval/60, 1), "min | Duration: ", SessionDuration, "min"),
+    DataPattern = strcat("Avg Client: ", round(AvgClientBytes), "B | Avg Server: ", round(AvgServerBytes), "B"),
+    ConsistencyScores = strcat("Timing: ", round(TimingScore, 1), "% | Data: ", round(OverallConsistency, 1), "%"),
+    UserAgent = useragent
+
+// =============================================================================
+// TUNING RECOMMENDATIONS
+// =============================================================================
+// 1. Adjust timing thresholds based on environment baseline
+// 2. Add organization-specific legitimate applications to exclusion lists  
+// 3. Fine-tune consistency scores based on observed false positive rates
+// 4. Consider adding IP reputation or threat intelligence enrichment
+// 5. Implement staged alerting (info -> low -> medium -> high) based on scores
+// =============================================================================
