@@ -52,10 +52,15 @@ DeviceNetworkEvents
     by DeviceName, RemoteIP, RemotePort, InitiatingProcessId, InitiatingProcessFileName
 | where array_length(Intervals) > 0
 // Statistical analysis of intervals
-| extend 
-    AvgInterval = todouble(array_sum(Intervals)) / array_length(Intervals),
-    MedianInterval = percentile_tdigest(make_tdigest(Intervals), 50),
-    StdDevInterval = stdev_tdigest(make_tdigest(Intervals))
+| extend AvgInterval = todouble(array_sum(Intervals)) / array_length(Intervals)
+// Calculate standard deviation manually using variance formula
+| mv-expand IntervalValue = Intervals to typeof(long)
+| extend SquaredDiff = pow(todouble(IntervalValue) - AvgInterval, 2)
+| summarize 
+    StdDevInterval = sqrt(sum(SquaredDiff) / count()),
+    MedianInterval = percentile(todouble(IntervalValue), 50),
+    take_any(AvgInterval, FirstConnection, LastConnection, ProcessInfo, InitiatingProcessAccountName, InitiatingProcessFolderPath, Duration, ConnectionCount)
+    by DeviceName, RemoteIP, RemotePort, InitiatingProcessId, InitiatingProcessFileName
 // Filter for consistent timing patterns
 | where AvgInterval between (minIntervalSeconds .. maxIntervalSeconds)
 | where StdDevInterval <= (AvgInterval * maxJitterPercent / 100.0)  // Low jitter indicates beaconing
@@ -124,10 +129,15 @@ DeviceNetworkEvents
     take_any(ConnectionCount, UniqueDestinations, DestinationSample, FirstNetwork, LastNetwork, FileName, FolderPath, ProcessVersionInfoCompanyName)
     by DeviceName, ProcessId
 | where array_length(NetworkIntervals) > 2
-| extend 
-    AvgNetworkInterval = todouble(array_sum(NetworkIntervals)) / array_length(NetworkIntervals),
-    NetworkStdDev = stdev_tdigest(make_tdigest(NetworkIntervals)),
-    NetworkDuration = datetime_diff('minute', LastNetwork, FirstNetwork)
+| extend AvgNetworkInterval = todouble(array_sum(NetworkIntervals)) / array_length(NetworkIntervals)
+// Calculate standard deviation manually
+| mv-expand IntervalValue = NetworkIntervals to typeof(long)
+| extend SquaredDiff = pow(todouble(IntervalValue) - AvgNetworkInterval, 2)
+| summarize 
+    NetworkStdDev = sqrt(sum(SquaredDiff) / count()),
+    NetworkDuration = datetime_diff('minute', FirstNetwork, LastNetwork),
+    take_any(AvgNetworkInterval, ActualConnectionCount, ConnectionCount, UniqueDestinations, DestinationSample, FirstNetwork, LastNetwork, FileName, FolderPath, ProcessVersionInfoCompanyName)
+    by DeviceName, ProcessId
 | where NetworkStdDev <= (AvgNetworkInterval * intervalTolerance / 100.0)
 | extend ConsistencyScore = 100 - ((NetworkStdDev / AvgNetworkInterval) * 100)
 | where ConsistencyScore >= 75
@@ -189,16 +199,23 @@ NetskopeEventsConnection_CL
     take_any(SessionCount, ClientBytes, ServerBytes, TransactionCounts, FirstSession, LastSession, app, site, hostname, useragent)
     by ur_normalized, dstip, dstport
 | where array_length(SessionIntervals) > 0
-// Analyze data transfer patterns
-| extend 
-    AvgClientBytes = avg_tdigest(make_tdigest(ClientBytes)),
-    AvgServerBytes = avg_tdigest(make_tdigest(ServerBytes)),
-    ClientBytesStdDev = stdev_tdigest(make_tdigest(ClientBytes)),
-    ServerBytesStdDev = stdev_tdigest(make_tdigest(ServerBytes))
-// Timing analysis
-| extend 
-    AvgSessionInterval = todouble(array_sum(SessionIntervals)) / array_length(SessionIntervals),
-    TimingStdDev = stdev_tdigest(make_tdigest(SessionIntervals))
+// Analyze data transfer patterns - calculate averages and standard deviations
+| mv-expand ClientByteValue = ClientBytes to typeof(long), ServerByteValue = ServerBytes to typeof(long)
+| summarize 
+    AvgClientBytes = avg(todouble(ClientByteValue)),
+    AvgServerBytes = avg(todouble(ServerByteValue)),
+    ClientBytesStdDev = stdev(todouble(ClientByteValue)),
+    ServerBytesStdDev = stdev(todouble(ServerByteValue)),
+    take_any(SessionIntervals, ActualSessionCount, SessionCount, TransactionCounts, FirstSession, LastSession, app, site, hostname, useragent)
+    by ur_normalized, dstip, dstport
+// Timing analysis with manual standard deviation calculation
+| extend AvgSessionInterval = todouble(array_sum(SessionIntervals)) / array_length(SessionIntervals)
+| mv-expand IntervalValue = SessionIntervals to typeof(long)
+| extend SquaredDiff = pow(todouble(IntervalValue) - AvgSessionInterval, 2)
+| summarize 
+    TimingStdDev = sqrt(sum(SquaredDiff) / count()),
+    take_any(AvgSessionInterval, AvgClientBytes, AvgServerBytes, ClientBytesStdDev, ServerBytesStdDev, ActualSessionCount, SessionCount, TransactionCounts, FirstSession, LastSession, app, site, hostname, useragent)
+    by ur_normalized, dstip, dstport
 | where AvgSessionInterval between (60 .. 1800)  // 1 minute to 30 minutes
 | where TimingStdDev <= (AvgSessionInterval * maxTimingVariance / 100.0)
 // Data consistency analysis
