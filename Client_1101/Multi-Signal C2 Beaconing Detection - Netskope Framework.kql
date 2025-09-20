@@ -1,0 +1,586 @@
+// =============================================================================
+// Multi-Signal C2 Beaconing Detection - Netskope Framework Analysis
+// =============================================================================
+// Author: Security Detection Engineering
+// Description: Analysis and framework for implementing Netskope's multi-signal
+//              approach to C2 beaconing detection in Microsoft Sentinel
+// Reference: Netskope "Effective C2 Beaconing Detection White Paper"
+// Status: ANALYSIS PHASE - Table Assessment and Signal Identification
+// =============================================================================
+
+// =============================================================================
+// EXECUTIVE SUMMARY - NETSKOPE RECOMMENDATIONS
+// =============================================================================
+/*
+Key Insights from Netskope White Paper:
+
+1. MODERN C2 CHALLENGES:
+   - Dynamic/malleable profiles (Cobalt Strike, etc.) change timing, headers, URIs, TLS certs
+   - Use of redirectors, proxy hops, CDNs, domain fronting
+   - Low & slow communication to blend with benign traffic
+
+2. WHY TRADITIONAL DETECTION FAILS:
+   - IPS/signature detection is brittle and easily evaded
+   - IP/URL blocklists are reactive with high false positive/negative rates
+   - Simple heuristics (fixed intervals) fail against jitter/randomization
+
+3. RECOMMENDED APPROACH - MULTI-SIGNAL BEHAVIOR + ANOMALY DETECTION:
+   - Comprehensive signals across multiple data sources
+   - Anomaly detection with baselines per user/device/role
+   - Granular risk scoring that accumulates low-fidelity signals
+   - Robust training/testing with benign traffic baselines
+
+4. KEY SIGNAL CATEGORIES:
+   - Network: Source, destination, TLS/SSL certificates, domain/IP/URL
+   - Application: User agent, HTTP headers, URI patterns
+   - Process: Process/user context, execution paths
+   - Traffic: Volume, burstiness, timing patterns, payload size
+   - Behavioral: Deviations from established baselines
+*/
+
+// =============================================================================
+// TABLE ANALYSIS - AVAILABLE DATA SOURCES
+// =============================================================================
+
+// =============================================================================
+// PRIMARY TABLES FOR MULTI-SIGNAL C2 DETECTION
+// =============================================================================
+
+// 1. DEVICENETWORKEVENTS - Core Network Behavior Signals
+// Available signals: Source/Dest IPs, Ports, Process Context, Timing, URLs
+// Netskope alignment: HIGH - Primary source for network flow, timing, process context
+// Usage: Network flow analysis, timing patterns, process-to-network correlation
+/*
+Key fields for C2 detection:
+- TimeGenerated: Timing pattern analysis
+- RemoteIP/RemotePort: Destination analysis
+- RemoteUrl: Domain/URL pattern analysis  
+- InitiatingProcessFileName/FolderPath: Process context
+- InitiatingProcessCommandLine: Execution context
+- ActionType: Connection success/failure patterns
+*/
+
+// 2. NETSKOPEEVENTCONNECTION_CL - Enhanced Network Context
+// Available signals: Detailed connection metadata, potentially SSL/TLS info
+// Netskope alignment: VERY HIGH - Native Netskope data with enhanced visibility
+// Usage: SSL/TLS certificate analysis, enhanced connection metadata, domain categorization
+/*
+Expected enhanced signals:
+- TLS/SSL certificate attributes
+- Domain categorization and risk scoring
+- Enhanced user agent analysis
+- Connection metadata beyond basic network logs
+*/
+
+// 3. DEVICEPROCESSEVENTS - Process Execution Context
+// Available signals: Process lifecycle, parent/child relationships, command lines
+// Netskope alignment: HIGH - Critical for process context and anomaly detection
+// Usage: Unusual process execution patterns, process-network correlation, baseline establishment
+/*
+Key fields for C2 detection:
+- ProcessVersionInfoCompanyName: Unsigned/suspicious binaries
+- FolderPath: Execution from unusual locations
+- ProcessCommandLine: Suspicious parameters or obfuscation
+- ProcessId/ProcessCreationTime: Process lifecycle correlation
+*/
+
+// 4. NETSKOPEEVENTAPPLICATION_QUERY - Application-Level Signals
+// Available signals: Application behavior, user interactions, data access patterns
+// Netskope alignment: HIGH - Application-layer anomaly detection
+// Usage: User behavior baselines, application usage anomalies, data access patterns
+/*
+Expected signals:
+- Application usage patterns per user/device
+- Data upload/download anomalies  
+- Unusual application behavior
+- User activity baselines
+*/
+
+// 5. NETSKOPEEVENTAUDIT_QUERY - User and Admin Activity
+// Available signals: User authentication, admin activities, policy violations
+// Netskope alignment: MEDIUM - Supporting context for user risk scoring
+// Usage: User risk context, authentication anomalies, administrative activity correlation
+
+// =============================================================================
+// SECONDARY/SUPPORTING TABLES
+// =============================================================================
+
+// 6. DEVICEREGISTRYEVENTS - Host Behavior Context
+// Available signals: Registry modifications, persistence mechanisms
+// Netskope alignment: MEDIUM - Supporting evidence for host compromise
+// Usage: Persistence detection, host-based indicators, compromise confirmation
+
+// 7. AZUREACTIVITY - Cloud Infrastructure Context  
+// Available signals: Azure resource access, configuration changes
+// Netskope alignment: MEDIUM - Infrastructure context for attack lifecycle
+// Usage: Cloud resource abuse, infrastructure compromise indicators
+
+// 8. CISCORDUO_QUERY - Authentication Context
+// Available signals: Multi-factor authentication, access patterns
+// Netskope alignment: MEDIUM - User access baseline establishment
+// Usage: Authentication anomaly detection, user behavior baselines
+
+// =============================================================================
+// SIGNAL PRIORITIZATION FOR IMPLEMENTATION
+// =============================================================================
+
+// TIER 1 - HIGHEST PRIORITY (Primary C2 Detection Signals)
+/*
+1. DeviceNetworkEvents: 
+   - Core timing pattern analysis
+   - Process-to-network correlation
+   - Basic flow metadata
+
+2. NetskopeEventsConnection_CL:
+   - Enhanced TLS/SSL analysis
+   - Domain reputation/categorization
+   - Advanced connection metadata
+*/
+
+// TIER 2 - HIGH PRIORITY (Context and Anomaly Detection)
+/*  
+3. DeviceProcessEvents:
+   - Process execution anomalies
+   - Baseline establishment per device/user
+   - Process legitimacy assessment
+
+4. NetskopeEventsApplication_CL:
+   - User behavior baselines
+   - Application usage anomalies
+   - Data access pattern analysis
+*/
+
+// TIER 3 - SUPPORTING EVIDENCE (Risk Scoring and Context)
+/*
+5. NetskopeEventsAudit_CL: User risk context
+6. DeviceRegistryEvents: Host compromise indicators  
+7. AzureActivity: Infrastructure context
+8. CiscoDuo_Query: Authentication baselines
+*/
+
+// =============================================================================
+// IMPLEMENTATION ROADMAP - NETSKOPE FRAMEWORK
+// =============================================================================
+
+// PHASE 1: BASELINE ESTABLISHMENT (30-60 days)
+/*
+Objective: Build "normal" behavior baselines per Netskope recommendations
+
+Priority Tables: DeviceNetworkEvents, DeviceProcessEvents, NetskopeEventsConnection_CL
+Key Metrics:
+- Per-user/device network connection patterns
+- Process execution frequency and timing
+- Domain/URL access patterns
+- TLS/SSL certificate usage patterns
+- Application usage baselines
+*/
+
+// PHASE 2: MULTI-SIGNAL ANOMALY DETECTION (60-90 days)
+/*
+Objective: Implement anomaly detection across multiple signal sources
+
+Signal Fusion:
+- Combine network timing + process context + TLS attributes
+- Cross-correlate unusual processes with network behavior
+- Detect deviations from established baselines
+- Implement risk scoring accumulation
+*/
+
+// PHASE 3: ADVANCED BEHAVIORAL ANALYSIS (90+ days)
+/*
+Objective: Advanced behavioral models and risk scoring
+
+Advanced Features:
+- Machine learning-based anomaly detection
+- Dynamic threshold adjustment
+- Multi-dimensional risk scoring
+- Adaptive baseline updating
+*/
+
+// =============================================================================
+// SPECIFIC IMPLEMENTATION CONSIDERATIONS
+// =============================================================================
+
+// DATA VOLUME OPTIMIZATION:
+// Challenge: Multi-signal approach will increase query complexity and data volume
+// Solution: Implement tiered filtering and pre-aggregation strategies per table
+
+// BASELINE ESTABLISHMENT:
+// Challenge: Need sufficient "normal" traffic data for meaningful baselines
+// Solution: Start with 30-day minimum baseline, extend to 90 days for seasonal patterns
+
+// FALSE POSITIVE MANAGEMENT:
+// Challenge: Multiple low-fidelity signals may increase noise
+// Solution: Implement weighted risk scoring, require signal correlation thresholds
+
+// PERFORMANCE CONSIDERATIONS:
+// Challenge: Cross-table joins and complex analytics may impact performance
+// Solution: Use materialized views, pre-computed baselines, and tiered analysis
+
+// =============================================================================
+// NEXT STEPS
+// =============================================================================
+/*
+1. IMMEDIATE (Week 1):
+   - Analyze actual schema and data availability in priority tables
+   - Validate Netskope events connection data richness
+   - Establish data retention and volume baselines
+
+2. SHORT TERM (Weeks 2-4):
+   - Begin baseline data collection across primary tables
+   - Implement basic multi-signal correlation queries
+   - Establish performance benchmarks
+
+3. MEDIUM TERM (Months 2-3):
+   - Deploy initial anomaly detection rules
+   - Implement risk scoring framework
+   - Begin false positive/negative analysis
+
+4. LONG TERM (Months 4-6):
+   - Advanced behavioral models
+   - Machine learning integration
+   - Continuous baseline refinement
+*/
+
+// =============================================================================
+// CONCLUSION
+// =============================================================================
+/*
+The Netskope multi-signal approach requires a fundamental shift from single-indicator
+detection to behavioral analysis across multiple data sources. The available tables
+in this environment provide excellent coverage for implementing this approach:
+
+STRENGTHS:
+- Native Netskope data provides enhanced visibility
+- Good coverage of network, process, and application signals  
+- Multiple data sources enable robust correlation
+
+CHALLENGES:
+- Increased complexity requires careful performance optimization
+- Baseline establishment needs significant planning and data collection
+- False positive management requires sophisticated risk scoring
+
+RECOMMENDATION:
+Implement in phases, starting with Tier 1 tables for basic multi-signal detection,
+then expanding to full behavioral analysis framework.
+*/
+
+// =============================================================================
+// IMPLEMENTATION QUERIES - MULTI-SIGNAL C2 BEACONING DETECTION
+// =============================================================================
+
+// =============================================================================
+// QUERY 1: SIMPLE NETWORK TIMING BEACONING (Netskope Framework - Basic)
+// =============================================================================
+// Description: Straightforward timing-based beaconing detection with process context
+// Netskope Signals: Network timing patterns + Process context
+// Confidence: Medium - Single signal category but enhanced filtering
+//
+let lookback = 24h;
+let minBeaconCount = 6;           
+let maxJitterPercent = 20;        
+let minIntervalSeconds = 30;      
+let maxIntervalSeconds = 3600;    
+//
+DeviceNetworkEvents
+| where TimeGenerated >= ago(lookback)
+| where ActionType == "ConnectionSuccess"
+| where RemoteIPType == "Public"
+| where RemotePort in (80, 443, 8080, 8443, 53)
+// Enhanced process filtering per Netskope recommendations
+| where not(InitiatingProcessFileName in~ ("svchost.exe", "winlogon.exe", "csrss.exe", "dwm.exe", "explorer.exe"))
+| where not(InitiatingProcessVersionInfoCompanyName in~ ("Microsoft Corporation", "Google LLC", "Apple Inc."))
+| where not(RemoteUrl has_any ("microsoft", "google", "apple", "adobe", "mozilla", "update", "aws", "azure"))
+// Focus on suspicious process locations
+| where InitiatingProcessFolderPath contains @"\Temp\" or 
+         InitiatingProcessFolderPath contains @"\AppData\" or
+         InitiatingProcessFolderPath contains @"\Users\Public\" or
+         InitiatingProcessFolderPath == ""
+// Group and analyze timing
+| summarize 
+    ConnectionTimes = make_list(TimeGenerated),
+    ConnectionCount = count(),
+    FirstConnection = min(TimeGenerated),
+    LastConnection = max(TimeGenerated),
+    ProcessDetails = make_set(strcat(InitiatingProcessFileName, " | ", InitiatingProcessFolderPath)),
+    CommandLines = make_set(InitiatingProcessCommandLine)
+    by DeviceName, RemoteIP, RemotePort, InitiatingProcessId
+| where ConnectionCount >= minBeaconCount
+// Calculate intervals
+| mv-expand ConnectionTime = ConnectionTimes to typeof(datetime)
+| sort by DeviceName, RemoteIP, RemotePort, InitiatingProcessId, ConnectionTime asc
+| extend NextConnectionTime = next(ConnectionTime, 1)
+| extend IntervalSeconds = datetime_diff('second', NextConnectionTime, ConnectionTime)
+| where isnotnull(IntervalSeconds) and IntervalSeconds > 0
+| summarize 
+    Intervals = make_list(IntervalSeconds),
+    take_any(ConnectionCount, FirstConnection, LastConnection, ProcessDetails, CommandLines)
+    by DeviceName, RemoteIP, RemotePort, InitiatingProcessId
+| where array_length(Intervals) >= 3
+// Statistical analysis
+| extend AvgInterval = todouble(array_sum(Intervals)) / array_length(Intervals)
+| mv-expand IntervalValue = Intervals to typeof(long)
+| extend SquaredDiff = pow(todouble(IntervalValue) - AvgInterval, 2)
+| summarize 
+    StdDevInterval = sqrt(sum(SquaredDiff) / count()),
+    take_any(AvgInterval, ConnectionCount, FirstConnection, LastConnection, ProcessDetails, CommandLines)
+    by DeviceName, RemoteIP, RemotePort, InitiatingProcessId
+// Apply Netskope timing thresholds
+| where AvgInterval between (minIntervalSeconds .. maxIntervalSeconds)
+| where StdDevInterval <= (AvgInterval * maxJitterPercent / 100.0)
+| extend 
+    RegularityScore = round(100 - ((StdDevInterval / AvgInterval) * 100), 1),
+    Duration = datetime_diff('second', LastConnection, FirstConnection),
+    TotalDuration = strcat(round(Duration/3600, 1), " hours")
+| where RegularityScore >= 75
+| project
+    DeviceName, RemoteIP, RemotePort, InitiatingProcessId,
+    ConnectionCount, RegularityScore, 
+    AvgIntervalMinutes = round(AvgInterval/60, 1),
+    TotalDuration, ProcessDetails, CommandLines,
+    FirstConnection, LastConnection
+| sort by RegularityScore desc, ConnectionCount desc;
+
+// =============================================================================
+// QUERY 2: MULTI-SIGNAL CORRELATION (Netskope Framework - Intermediate)
+// =============================================================================
+// Description: Correlates network timing with Netskope application data for enhanced detection
+// Netskope Signals: Network timing + Application behavior + User context
+// Confidence: High - Multiple signal correlation
+//
+let lookback = 24h;
+let minBeaconCount = 5;
+let maxJitterPercent = 25;
+//
+// Step 1: Identify timing-based network beaconing candidates
+let NetworkBeaconing = 
+DeviceNetworkEvents
+| where TimeGenerated >= ago(lookback)
+| where ActionType == "ConnectionSuccess"
+| where RemoteIPType == "Public"
+| where RemotePort in (80, 443, 8080, 8443)
+// Apply enhanced filtering
+| where not(InitiatingProcessFileName in~ ("svchost.exe", "winlogon.exe", "csrss.exe", "msedge.exe", "chrome.exe"))
+| where not(InitiatingProcessVersionInfoCompanyName in~ ("Microsoft Corporation", "Google LLC"))
+| where not(RemoteUrl has_any ("microsoft", "google", "apple", "adobe", "mozilla"))
+| summarize 
+    ConnectionTimes = make_list(TimeGenerated),
+    ConnectionCount = count(),
+    NetworkProcesses = make_set(InitiatingProcessFileName),
+    take_any(InitiatingProcessAccountName, RemoteUrl)
+    by DeviceName, RemoteIP, RemotePort, bin(TimeGenerated, 1h)
+| where ConnectionCount >= 3
+// Calculate timing regularity
+| mv-expand ConnectionTime = ConnectionTimes to typeof(datetime)
+| sort by DeviceName, RemoteIP, RemotePort, bin_TimeGenerated, ConnectionTime asc
+| extend NextConnectionTime = next(ConnectionTime, 1)
+| extend IntervalSeconds = datetime_diff('second', NextConnectionTime, ConnectionTime)
+| where isnotnull(IntervalSeconds) and IntervalSeconds > 0
+| summarize 
+    Intervals = make_list(IntervalSeconds),
+    take_any(ConnectionCount, NetworkProcesses, InitiatingProcessAccountName, RemoteUrl)
+    by DeviceName, RemoteIP, RemotePort, bin_TimeGenerated
+| where array_length(Intervals) >= 2
+| extend AvgInterval = todouble(array_sum(Intervals)) / array_length(Intervals)
+| mv-expand IntervalValue = Intervals to typeof(long)
+| extend SquaredDiff = pow(todouble(IntervalValue) - AvgInterval, 2)
+| summarize 
+    StdDevInterval = sqrt(sum(SquaredDiff) / count()),
+    take_any(AvgInterval, ConnectionCount, NetworkProcesses, InitiatingProcessAccountName, RemoteUrl)
+    by DeviceName, RemoteIP, RemotePort, bin_TimeGenerated
+| where AvgInterval between (30 .. 3600) and StdDevInterval <= (AvgInterval * maxJitterPercent / 100.0)
+| extend RegularityScore = round(100 - ((StdDevInterval / AvgInterval) * 100), 1)
+| where RegularityScore >= 70
+| project DeviceName, RemoteIP, TimeWindow = bin_TimeGenerated, NetworkRegularityScore = RegularityScore, 
+         NetworkConnections = ConnectionCount, NetworkProcesses, UserAccount = InitiatingProcessAccountName, 
+         DestinationUrl = RemoteUrl;
+//
+// Step 2: Correlate with Netskope application behavior
+let ApplicationAnomalies = 
+NetskopeEventsApplication_CL
+| where TimeGenerated >= ago(lookback)
+| where activity in ("Upload", "Download", "Browse")
+| where not(app has_any ("Microsoft", "Google", "Apple"))
+| where ccl in ("poor", "low", "unknown")  // Low cloud confidence level
+| summarize 
+    AppActivities = count(),
+    UniqueApps = dcount(app),
+    ActivityTypes = make_set(activity),
+    AppCategories = make_set(appcategory),
+    DataTransfer = sum(coalesce(file_size, 0)),
+    take_any(device, os, browser)
+    by ur_normalized, srcip, bin(TimeGenerated, 1h)
+| where AppActivities >= 3 or UniqueApps >= 2
+| project UserPrincipal = ur_normalized, SourceIP = srcip, TimeWindow = bin_TimeGenerated,
+         AppActivityScore = AppActivities, UniqueApps, ActivityTypes, AppCategories, 
+         DataTransfer, device, os, browser;
+//
+// Step 3: Multi-signal correlation
+NetworkBeaconing
+| join kind=inner (ApplicationAnomalies) on $left.TimeWindow == $right.TimeWindow
+| where DeviceName contains device or NetworkProcesses has_any (split(browser, " "))
+| extend 
+    MultiSignalScore = (NetworkRegularityScore * 0.6) + (AppActivityScore * 10 * 0.4),
+    RiskLevel = case(
+        MultiSignalScore >= 80, "High",
+        MultiSignalScore >= 60, "Medium", 
+        "Low")
+| where MultiSignalScore >= 55
+| project 
+    TimeWindow, DeviceName, UserAccount, UserPrincipal, 
+    RemoteIP, DestinationUrl, RiskLevel, MultiSignalScore,
+    NetworkRegularityScore, NetworkConnections, NetworkProcesses,
+    AppActivityScore, UniqueApps, ActivityTypes, AppCategories,
+    DataTransfer, device, os, browser
+| sort by MultiSignalScore desc;
+
+// =============================================================================
+// QUERY 3: COMPREHENSIVE BEHAVIORAL ANALYSIS (Netskope Framework - Advanced)
+// =============================================================================
+// Description: Full multi-signal approach combining network, process, and application signals
+// Netskope Signals: All categories - Network + Process + Application + User behavior
+// Confidence: Very High - Comprehensive signal fusion with baseline deviation
+//
+let lookback = 24h;
+let baselinePeriod = 7d;  // For user/device baselines per Netskope recommendations
+//
+// Step 1: Establish user/device baselines (Netskope core principle)
+let UserBaselines = 
+union
+(DeviceNetworkEvents 
+ | where TimeGenerated between (ago(baselinePeriod) .. ago(lookback))
+ | where ActionType == "ConnectionSuccess" and RemoteIPType == "Public"
+ | summarize 
+     BaselineConnections = count(),
+     BaselineUniqueIPs = dcount(RemoteIP),
+     BaselineUniquePorts = dcount(RemotePort),
+     BaselineProcesses = dcount(InitiatingProcessFileName)
+     by DeviceName, InitiatingProcessAccountName),
+(NetskopeEventsApplication_CL 
+ | where TimeGenerated between (ago(baselinePeriod) .. ago(lookback))
+ | summarize 
+     BaselineApps = dcount(app),
+     BaselineActivities = count(),
+     BaselineDataVolume = avg(coalesce(file_size, 0))
+     by ur_normalized)
+| extend BaselineType = "Network";
+//
+// Step 2: Current period network behavior analysis
+let CurrentNetworkBehavior = 
+DeviceNetworkEvents
+| where TimeGenerated >= ago(lookback)
+| where ActionType == "ConnectionSuccess" and RemoteIPType == "Public"
+| where RemotePort in (80, 443, 8080, 8443, 53)
+// Enhanced filtering per Netskope approach
+| where not(InitiatingProcessVersionInfoCompanyName in~ ("Microsoft Corporation", "Google LLC", "Apple Inc."))
+| where not(RemoteUrl has_any ("microsoft", "google", "apple", "adobe", "mozilla", "update"))
+| where InitiatingProcessFolderPath contains @"\Temp\" or 
+         InitiatingProcessFolderPath contains @"\AppData\" or 
+         InitiatingProcessFolderPath == ""
+| summarize 
+    ConnectionTimes = make_list(TimeGenerated),
+    ConnectionCount = count(),
+    UniqueIPs = dcount(RemoteIP),
+    UniquePorts = dcount(RemotePort),
+    UniqueProcesses = dcount(InitiatingProcessFileName),
+    ProcessDetails = make_set(strcat(InitiatingProcessFileName, "|", InitiatingProcessFolderPath)),
+    RemoteIPs = make_set(RemoteIP),
+    RemoteUrls = make_set(RemoteUrl)
+    by DeviceName, InitiatingProcessAccountName, bin(TimeGenerated, 2h)
+| where ConnectionCount >= 5
+// Timing analysis
+| mv-expand ConnectionTime = ConnectionTimes to typeof(datetime)
+| sort by DeviceName, InitiatingProcessAccountName, bin_TimeGenerated, ConnectionTime asc
+| extend NextConnectionTime = next(ConnectionTime, 1)
+| extend IntervalSeconds = datetime_diff('second', NextConnectionTime, ConnectionTime)
+| where isnotnull(IntervalSeconds) and IntervalSeconds between (30 .. 3600)
+| summarize 
+    Intervals = make_list(IntervalSeconds),
+    take_any(ConnectionCount, UniqueIPs, UniquePorts, UniqueProcesses, ProcessDetails, RemoteIPs, RemoteUrls)
+    by DeviceName, InitiatingProcessAccountName, bin_TimeGenerated
+| extend AvgInterval = todouble(array_sum(Intervals)) / array_length(Intervals)
+| mv-expand IntervalValue = Intervals to typeof(long)
+| extend SquaredDiff = pow(todouble(IntervalValue) - AvgInterval, 2)
+| summarize 
+    StdDevInterval = sqrt(sum(SquaredDiff) / count()),
+    take_any(AvgInterval, ConnectionCount, UniqueIPs, UniquePorts, UniqueProcesses, ProcessDetails, RemoteIPs, RemoteUrls)
+    by DeviceName, InitiatingProcessAccountName, bin_TimeGenerated
+| extend NetworkRegularityScore = round(100 - ((StdDevInterval / AvgInterval) * 100), 1)
+| where NetworkRegularityScore >= 65
+| project DeviceName, User = InitiatingProcessAccountName, TimeWindow = bin_TimeGenerated,
+         NetworkRegularityScore, ConnectionCount, UniqueIPs, UniquePorts, UniqueProcesses,
+         ProcessDetails, RemoteIPs, RemoteUrls;
+//
+// Step 3: Current period application behavior analysis  
+let CurrentAppBehavior = 
+NetskopeEventsApplication_CL
+| where TimeGenerated >= ago(lookback)
+| where not(app has_any ("Microsoft", "Google", "Apple"))
+| where ccl in ("poor", "low", "unknown") or action in ("alert", "block")
+| summarize 
+    AppCount = dcount(app),
+    ActivityCount = count(),
+    SuspiciousApps = make_set(app),
+    ActivityTypes = make_set(activity),
+    AlertCount = countif(alert == "yes"),
+    DataVolume = sum(coalesce(file_size, 0)),
+    take_any(device, os, browser)
+    by ur_normalized, bin(TimeGenerated, 2h)
+| where AppCount >= 2 or AlertCount > 0
+| extend AppRiskScore = (AlertCount * 30) + (AppCount * 10) + iff(DataVolume > 1000000, 20, 0)
+| project User = ur_normalized, TimeWindow = bin_TimeGenerated,
+         AppRiskScore, AppCount, ActivityCount, SuspiciousApps, ActivityTypes, 
+         AlertCount, DataVolume, device, os, browser;
+//
+// Step 4: Process behavior analysis
+let ProcessBehavior = 
+DeviceProcessEvents
+| where TimeGenerated >= ago(lookback)
+| where not(ProcessVersionInfoCompanyName in~ ("Microsoft Corporation", "Google LLC", "Apple Inc."))
+| where FolderPath contains @"\Temp\" or FolderPath contains @"\AppData\" or FolderPath == ""
+| where InitiatingProcessSignatureStatus in ("Unknown", "Unsigned", "Invalid")
+| summarize 
+    SuspiciousProcessCount = dcount(ProcessId),
+    UnsignedProcesses = make_set(FileName),
+    SuspiciousPaths = make_set(FolderPath),
+    CommandLines = make_set(InitiatingProcessCommandLine)
+    by DeviceName, AccountName, bin(TimeGenerated, 2h)
+| where SuspiciousProcessCount >= 1
+| extend ProcessRiskScore = SuspiciousProcessCount * 25
+| project DeviceName, User = AccountName, TimeWindow = bin_TimeGenerated,
+         ProcessRiskScore, SuspiciousProcessCount, UnsignedProcesses, SuspiciousPaths, CommandLines;
+//
+// Step 5: Multi-signal fusion and scoring
+CurrentNetworkBehavior
+| join kind=leftouter (CurrentAppBehavior) on User, TimeWindow  
+| join kind=leftouter (ProcessBehavior) on DeviceName, User, TimeWindow
+| extend 
+    // Netskope-style weighted scoring
+    CompositeScore = (NetworkRegularityScore * 0.4) + 
+                     (coalesce(AppRiskScore, 0) * 0.3) + 
+                     (coalesce(ProcessRiskScore, 0) * 0.3),
+    SignalCount = iff(NetworkRegularityScore > 0, 1, 0) + 
+                  iff(coalesce(AppRiskScore, 0) > 0, 1, 0) + 
+                  iff(coalesce(ProcessRiskScore, 0) > 0, 1, 0)
+| where SignalCount >= 2 and CompositeScore >= 50  // Multi-signal threshold
+| extend 
+    RiskLevel = case(
+        CompositeScore >= 80 and SignalCount >= 3, "Critical",
+        CompositeScore >= 65, "High",
+        CompositeScore >= 50, "Medium",
+        "Low"),
+    BeaconingLikelihood = case(
+        NetworkRegularityScore >= 85 and SignalCount >= 2, "Very High",
+        NetworkRegularityScore >= 75, "High", 
+        NetworkRegularityScore >= 65, "Medium",
+        "Low")
+| project 
+    TimeWindow, DeviceName, User, RiskLevel, BeaconingLikelihood,
+    CompositeScore, SignalCount,
+    // Network signals
+    NetworkRegularityScore, ConnectionCount, UniqueIPs, ProcessDetails, RemoteIPs,
+    // Application signals  
+    AppRiskScore, AppCount, SuspiciousApps, AlertCount, DataVolume,
+    // Process signals
+    ProcessRiskScore, SuspiciousProcessCount, UnsignedProcesses, SuspiciousPaths
+| sort by CompositeScore desc, NetworkRegularityScore desc;
